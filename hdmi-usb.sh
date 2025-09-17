@@ -96,7 +96,8 @@ usb_tail_for_video() {
   local full
   full="$(readlink -f "$sys" || true)"
   [[ -z "$full" ]] && return 1
-  echo "$full" | grep -oE 'usb-[^/ ]+' | tail -n1
+  # Extract USB path like "3-8.3.3" from "/sys/devices/pci0000:00/0000:00:14.0/usb3/3-8/3-8.3/3-8.3.3/3-8.3.3:1.0"
+  echo "$full" | grep -oE '[0-9]+-[0-9.]+' | tail -n1
 }
 
 alsa_card_for_usb_tail() {

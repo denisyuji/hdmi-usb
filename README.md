@@ -45,6 +45,17 @@ A simple script to detect and preview MacroSilicon USB HDMI capture devices usin
 - wmctrl (for window positioning)
 - MacroSilicon USB HDMI capture device
 
+### Installing Dependencies on Ubuntu
+
+```bash
+# Install all required dependencies
+sudo apt update
+sudo apt install gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav v4l-utils wmctrl
+
+# Optional: Install additional GStreamer plugins for better codec support
+sudo apt install gstreamer1.0-vaapi gstreamer1.0-plugins-base-apps
+```
+
 ## Installation
 
 ```bash

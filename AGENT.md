@@ -32,3 +32,20 @@ This project provides automated HDMI capture device detection and preview functi
 - `wmctrl` - Window positioning
 - `xwininfo` - Window information
 - `lsusb` - USB device listing
+
+## Commit Message Guidelines
+
+When making commits to this project, please generate commit messages that adhere to the Linux project commit guidelines with the following requirements:
+
+- The commit title must be in the format 'subject: description'.
+- The entire title (subject line) must be no more than 50 characters.
+- Use the imperative mood in the title.
+- Leave a blank line after the title.
+- Format the commit description body with lines no more than 50 characters.
+- Use clear and concise language that summarizes what was changed and why.
+- Use bullet points in the message body to list multiple changes or details.
+- Important: Do NOT wrap the message with triple backticks at the beginning or end. Use markdown formatting when necessary within the message body, but do NOT enclose the entire message in markdown code fences.
+
+## Commit Behavior Guidelines
+
+- **Only commit when explicitly requested**: Do not automatically commit changes unless the user specifically asks for a commit.

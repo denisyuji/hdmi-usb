@@ -124,8 +124,8 @@ else
 fi
 
 # --- Build & run pipeline --------------------------------------------------
-# Use ximagesink with window properties for better control
-GST_VIDEO="v4l2src device=${VIDEO_DEV} ! queue ! decodebin ! videoconvert ! ximagesink sync=false"
+# Use ximagesink with automatic video scaling to fit window
+GST_VIDEO="v4l2src device=${VIDEO_DEV} ! queue ! decodebin ! videoconvert ! videoscale ! ximagesink sync=false"
 
 # Window state file for saving/restoring position and size
 WINDOW_STATE_FILE="${HOME}/.hdmi-usb-window-state"
@@ -205,6 +205,8 @@ restore_window_state() {
       export RESTORE_Y="$y"
       export RESTORE_WIDTH="$width"
       export RESTORE_HEIGHT="$height"
+      
+      log "Will restore to: ${width}x${height} at position ${x},${y}"
     fi
   fi
 }
@@ -283,7 +285,7 @@ if kill -0 ${GST_PID} 2>/dev/null; then
   
   # Apply window state immediately with timeout and monitor window state changes
   if [[ -n "${RESTORE_X:-}" && -n "${RESTORE_Y:-}" ]]; then
-    log "Restoring window to saved position: ${RESTORE_X},${RESTORE_Y}"
+    log "Restoring window to saved size: ${RESTORE_WIDTH}x${RESTORE_HEIGHT} at position: ${RESTORE_X},${RESTORE_Y}"
     
     # Create restoration script with timeout
     cat > /tmp/hdmi-restore-$$.sh << EOF
@@ -298,7 +300,7 @@ done
 
 if [[ -n "\$window_id" ]]; then
   wmctrl -i -r "\$window_id" -e "0,${RESTORE_X},${RESTORE_Y},${RESTORE_WIDTH},${RESTORE_HEIGHT}" 2>/dev/null || true
-  echo "[INFO] Window restored successfully"
+  echo "[INFO] Window restored to ${RESTORE_WIDTH}x${RESTORE_HEIGHT} at ${RESTORE_X},${RESTORE_Y}"
 else
   echo "[INFO] Window not found, restoration skipped"
 fi

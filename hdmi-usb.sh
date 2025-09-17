@@ -212,39 +212,43 @@ restore_window_state() {
 # Function to apply window state after GStreamer starts
 apply_window_state() {
   local pid="$1"
-  sleep 3  # Wait for window to appear
   
   if [[ -n "${RESTORE_X:-}" && -n "${RESTORE_Y:-}" ]]; then
-    # Try to find and move the window using wmctrl
-    local window_id
-    window_id=$(xwininfo -name "gst-launch-1.0" 2>/dev/null | grep "Window id:" | awk '{print $4}' || true)
+    # Wait for window to appear with shorter intervals
+    local window_id=""
+    local attempts=0
+    while [[ -z "$window_id" && $attempts -lt 15 ]]; do
+      sleep 0.5
+      window_id=$(xwininfo -name "gst-launch-1.0" 2>/dev/null | grep "Window id:" | awk '{print $4}' || true)
+      ((attempts++))
+    done
     
     if [[ -n "$window_id" ]]; then
       # Use wmctrl to move and resize the window
       if command -v wmctrl >/dev/null 2>&1; then
-        # Try multiple times to ensure the position sticks
-        for i in {1..3}; do
-          wmctrl -i -r "$window_id" -e "0,${RESTORE_X},${RESTORE_Y},${RESTORE_WIDTH},${RESTORE_HEIGHT}" 2>/dev/null || true
-          sleep 1
+        # Apply position immediately
+        wmctrl -i -r "$window_id" -e "0,${RESTORE_X},${RESTORE_Y},${RESTORE_WIDTH},${RESTORE_HEIGHT}" 2>/dev/null || true
+        log "Window restored to saved position: ${RESTORE_X},${RESTORE_Y}"
+        
+        # Verify position was applied (optional, non-blocking)
+        sleep 0.5
+        local current_geometry
+        current_geometry=$(xwininfo -id "$window_id" 2>/dev/null | grep -- "-geometry" | awk '{print $2}' || true)
+        
+        if [[ "$current_geometry" =~ ^([0-9]+)x([0-9]+)\+([0-9]+)\+([0-9]+)$ ]]; then
+          local current_x="${BASH_REMATCH[3]}"
+          local current_y="${BASH_REMATCH[4]}"
           
-          # Check if position was applied correctly
-          local current_geometry
-          current_geometry=$(xwininfo -id "$window_id" 2>/dev/null | grep -- "-geometry" | awk '{print $2}' || true)
-          
-          if [[ "$current_geometry" =~ ^([0-9]+)x([0-9]+)\+([0-9]+)\+([0-9]+)$ ]]; then
-            local current_x="${BASH_REMATCH[3]}"
-            local current_y="${BASH_REMATCH[4]}"
-            
-            # If position matches (within 10 pixels tolerance), we're done
-            if [[ $((current_x - RESTORE_X)) -lt 10 && $((current_y - RESTORE_Y)) -lt 10 ]]; then
-              log "Window restored to saved position: ${RESTORE_X},${RESTORE_Y}"
-              break
-            fi
+          # If position doesn't match, try once more
+          if [[ $((current_x - RESTORE_X)) -ge 10 || $((current_y - RESTORE_Y)) -ge 10 ]]; then
+            wmctrl -i -r "$window_id" -e "0,${RESTORE_X},${RESTORE_Y},${RESTORE_WIDTH},${RESTORE_HEIGHT}" 2>/dev/null || true
           fi
-        done
+        fi
       else
         log "wmctrl not available, window position not restored"
       fi
+    else
+      log "Window not found after waiting, position not restored"
     fi
   fi
 }
@@ -277,7 +281,7 @@ if kill -0 ${GST_PID} 2>/dev/null; then
   log "Preview is running successfully in the background"
   log "Terminal is now free for other commands"
   
-  # Apply window state synchronously and monitor window state changes
+  # Apply window state immediately and monitor window state changes
   apply_window_state ${GST_PID} &
   (monitor_window_state ${GST_PID}) &
 else

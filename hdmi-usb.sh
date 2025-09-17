@@ -217,8 +217,8 @@ apply_window_state() {
     # Wait for window to appear with shorter intervals
     local window_id=""
     local attempts=0
-    while [[ -z "$window_id" && $attempts -lt 15 ]]; do
-      sleep 0.5
+    while [[ -z "$window_id" && $attempts -lt 10 ]]; do
+      sleep 0.2
       window_id=$(xwininfo -name "gst-launch-1.0" 2>/dev/null | grep "Window id:" | awk '{print $4}' || true)
       ((attempts++))
     done
@@ -281,8 +281,9 @@ if kill -0 ${GST_PID} 2>/dev/null; then
   log "Preview is running successfully in the background"
   log "Terminal is now free for other commands"
   
-  # Apply window state immediately and monitor window state changes
-  apply_window_state ${GST_PID} &
+  # Apply window state in background and monitor window state changes
+  log "Starting window restoration in background..."
+  (apply_window_state ${GST_PID}) &
   (monitor_window_state ${GST_PID}) &
 else
   err "GStreamer failed to start properly"

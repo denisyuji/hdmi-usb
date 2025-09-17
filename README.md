@@ -7,14 +7,22 @@ A simple script to detect and preview MacroSilicon USB HDMI capture devices usin
 - **Auto-detection** of MacroSilicon USB Video devices
 - **Background execution** - terminal remains free for other commands
 - **Window state persistence** - remembers window position and size
-- **Silent operation** - no GStreamer log spam
+- **Silent operation** - no output by default (use `--debug` for logs)
 - **Audio support** - automatically detects and uses audio from capture device
+- **Debug mode** - verbose logging for troubleshooting
+- **Help system** - built-in usage information
 
 ## Usage
 
 ```bash
-# Start HDMI capture preview
+# Start HDMI capture preview (silent mode)
 ./hdmi-usb.sh
+
+# Start with debug output
+./hdmi-usb.sh --debug
+
+# Show help information
+./hdmi-usb.sh --help
 
 # Reset window position to default
 ./hdmi-usb.sh --reset-window
@@ -22,6 +30,12 @@ A simple script to detect and preview MacroSilicon USB HDMI capture devices usin
 # Install system-wide
 ./install.sh
 ```
+
+### Command Line Options
+
+- `-d, --debug` - Enable debug mode (show application and GStreamer logs)
+- `-h, --help` - Show help message
+- `--reset-window` - Reset saved window position and size
 
 ## Requirements
 

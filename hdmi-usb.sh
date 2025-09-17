@@ -3,7 +3,15 @@
 
 set -euo pipefail
 
-log() { echo "[INFO] $*"; }
+# Debug mode flag
+DEBUG_MODE=false
+
+# Logging functions
+log() { 
+  if [[ "$DEBUG_MODE" == "true" ]]; then
+    echo "[INFO] $*"
+  fi
+}
 err() { echo "[ERR] $*" >&2; }
 
 # Match this exact block name from `v4l2-ctl --list-devices`
@@ -12,17 +20,60 @@ MATCH_NAME="${MATCH_NAME:-MacroSilicon USB Video}"
 # Optional override for ALSA card index (e.g., export AUDIO_FORCE_CARD=3)
 AUDIO_FORCE_CARD="${AUDIO_FORCE_CARD:-}"
 
+# Help function
+show_help() {
+  cat << EOF
+HDMI USB Capture Device Preview Tool
+
+USAGE:
+    $0 [OPTIONS]
+
+OPTIONS:
+    -d, --debug          Enable debug mode (show application and GStreamer logs)
+    -h, --help           Show this help message
+        --reset-window   Reset saved window position and size
+
+DESCRIPTION:
+    Automatically detects MacroSilicon USB Video HDMI capture devices and
+    launches a GStreamer preview window. The window position and size
+    are automatically saved and restored between sessions.
+
+EXAMPLES:
+    $0                   # Launch with default settings (no debug output)
+    $0 --debug           # Launch with debug output enabled
+    $0 --reset-window    # Reset window state and exit
+
+EOF
+}
+
 # Check for command line options
-if [[ "${1:-}" == "--reset-window" ]]; then
-  WINDOW_STATE_FILE="${HOME}/.hdmi-usb-window-state"
-  if [[ -f "$WINDOW_STATE_FILE" ]]; then
-    rm "$WINDOW_STATE_FILE"
-    log "Window state reset. Next launch will use default position."
-  else
-    log "No saved window state found."
-  fi
-  exit 0
-fi
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -d|--debug)
+      DEBUG_MODE=true
+      shift
+      ;;
+    -h|--help)
+      show_help
+      exit 0
+      ;;
+    --reset-window)
+      WINDOW_STATE_FILE="${HOME}/.hdmi-usb-window-state"
+      if [[ -f "$WINDOW_STATE_FILE" ]]; then
+        rm "$WINDOW_STATE_FILE"
+        echo "[INFO] Window state reset. Next launch will use default position."
+      else
+        echo "[INFO] No saved window state found."
+      fi
+      exit 0
+      ;;
+    *)
+      err "Unknown option: $1"
+      echo "Use --help for usage information."
+      exit 1
+      ;;
+  esac
+done
 
 is_video_hdmi_usb() {
   local dev="$1"
@@ -97,13 +148,15 @@ if [[ -z "$VIDEO_DEV" ]]; then
 fi
 
 log "Selected video node: ${VIDEO_DEV}"
-v4l2-ctl -d "${VIDEO_DEV}" --all | awk '
-  /Card type/ {print "[INFO] " $0}
-  /Bus info/ {print "[INFO] " $0}
-  /Width\/Height/ {print "[INFO] " $0}
-  /Pixel Format/ {print "[INFO] " $0}
-  /Frames per second/ {print "[INFO] " $0}
-' || true
+if [[ "$DEBUG_MODE" == "true" ]]; then
+  v4l2-ctl -d "${VIDEO_DEV}" --all | awk '
+    /Card type/ {print "[INFO] " $0}
+    /Bus info/ {print "[INFO] " $0}
+    /Width\/Height/ {print "[INFO] " $0}
+    /Pixel Format/ {print "[INFO] " $0}
+    /Frames per second/ {print "[INFO] " $0}
+  ' || true
+fi
 
 # --- Match ALSA card -------------------------------------------------------
 AUDIO_CARD=""
@@ -262,14 +315,22 @@ if [[ -n "${AUDIO_CARD}" ]]; then
   GST_AUDIO="alsasrc device=hw:${AUDIO_CARD},0 ! audioconvert ! audioresample ! autoaudiosink sync=false"
   log "Launching A/V preview in background (video=${VIDEO_DEV}, audio=hw:${AUDIO_CARD},0)"
   log "GStreamer command: gst-launch-1.0 ${GST_VIDEO} ${GST_AUDIO}"
-  gst-launch-1.0 ${GST_VIDEO} ${GST_AUDIO} >/dev/null 2>&1 &
+  if [[ "$DEBUG_MODE" == "true" ]]; then
+    gst-launch-1.0 ${GST_VIDEO} ${GST_AUDIO} &
+  else
+    gst-launch-1.0 ${GST_VIDEO} ${GST_AUDIO} >/dev/null 2>&1 &
+  fi
   GST_PID=$!
   log "GStreamer started with PID: ${GST_PID}"
   log "To stop the preview, run: kill ${GST_PID}"
 else
   log "Launching video-only preview in background (video=${VIDEO_DEV})"
   log "GStreamer command: gst-launch-1.0 ${GST_VIDEO}"
-  gst-launch-1.0 ${GST_VIDEO} >/dev/null 2>&1 &
+  if [[ "$DEBUG_MODE" == "true" ]]; then
+    gst-launch-1.0 ${GST_VIDEO} &
+  else
+    gst-launch-1.0 ${GST_VIDEO} >/dev/null 2>&1 &
+  fi
   GST_PID=$!
   log "GStreamer started with PID: ${GST_PID}"
   log "To stop the preview, run: kill ${GST_PID}"
@@ -298,12 +359,16 @@ while [[ -z "\$window_id" && \$attempts -lt 50 ]]; do
   ((attempts++))
 done
 
-if [[ -n "\$window_id" ]]; then
-  wmctrl -i -r "\$window_id" -e "0,${RESTORE_X},${RESTORE_Y},${RESTORE_WIDTH},${RESTORE_HEIGHT}" 2>/dev/null || true
-  echo "[INFO] Window restored to ${RESTORE_WIDTH}x${RESTORE_HEIGHT} at ${RESTORE_X},${RESTORE_Y}"
-else
-  echo "[INFO] Window not found, restoration skipped"
-fi
+            if [[ -n "\$window_id" ]]; then
+              wmctrl -i -r "\$window_id" -e "0,${RESTORE_X},${RESTORE_Y},${RESTORE_WIDTH},${RESTORE_HEIGHT}" 2>/dev/null || true
+              if [[ "${DEBUG_MODE}" == "true" ]]; then
+                echo "[INFO] Window restored to ${RESTORE_WIDTH}x${RESTORE_HEIGHT} at ${RESTORE_X},${RESTORE_Y}"
+              fi
+            else
+              if [[ "${DEBUG_MODE}" == "true" ]]; then
+                echo "[INFO] Window not found, restoration skipped"
+              fi
+            fi
 EOF
     
     chmod +x /tmp/hdmi-restore-$$.sh

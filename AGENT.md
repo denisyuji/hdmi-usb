@@ -9,9 +9,11 @@ This project provides automated HDMI capture device detection and preview functi
 ### hdmi-usb.sh
 - **Device Detection**: Uses `v4l2-ctl` to identify MacroSilicon USB Video devices
 - **Resolution Filtering**: Ensures device supports high-resolution capture (1920x1080/1280x720)
-- **GStreamer Pipeline**: `v4l2src → decodebin → videoconvert → ximagesink`
+- **GStreamer Pipeline**: `v4l2src → decodebin → videoconvert → videoscale → ximagesink`
 - **Window Management**: Automatic position/size saving and restoration using `wmctrl`
 - **Background Execution**: Runs GStreamer silently without blocking terminal
+- **Debug Mode**: `--debug` flag enables verbose logging for troubleshooting
+- **Help System**: `--help` flag provides usage information
 
 ### install.sh
 - **System Installation**: Copies script to `~/.local/bin/hdmi-usb`
@@ -49,3 +51,9 @@ When making commits to this project, please generate commit messages that adhere
 ## Commit Behavior Guidelines
 
 - **Only commit when explicitly requested**: Do not automatically commit changes unless the user specifically asks for a commit.
+
+## Usage Guidelines
+
+- **Always use --debug flag**: When testing or troubleshooting, always run the script with the `--debug` flag to see detailed logs and GStreamer output.
+- **Default mode is silent**: Without `--debug`, the script runs silently with no output unless there are errors.
+- **Window state management**: Use `--reset-window` to clear saved window position/size if needed.

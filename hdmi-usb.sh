@@ -152,6 +152,40 @@ save_window_state() {
   fi
 }
 
+# Function to monitor window and save state on changes
+monitor_window_state() {
+  local pid="$1"
+  sleep 3  # Wait for window to appear
+  
+  local last_geometry=""
+  local window_id
+  
+  # Find the window ID
+  window_id=$(xwininfo -name "gst-launch-1.0" 2>/dev/null | grep "Window id:" | awk '{print $4}' || true)
+  
+  if [[ -z "$window_id" ]]; then
+    return 1
+  fi
+  
+  log "Monitoring window $window_id for position changes..."
+  
+  # Monitor window position every 2 seconds
+  while kill -0 "$pid" 2>/dev/null; do
+    local current_geometry
+    current_geometry=$(xwininfo -id "$window_id" 2>/dev/null | grep -- "-geometry" | awk '{print $2}' || true)
+    
+    if [[ -n "$current_geometry" && "$current_geometry" != "$last_geometry" ]]; then
+      echo "$current_geometry" > "$WINDOW_STATE_FILE"
+      log "Window moved, state updated: $current_geometry"
+      last_geometry="$current_geometry"
+    fi
+    
+    sleep 2
+  done
+  
+  log "Window monitoring stopped"
+}
+
 # Function to restore window state
 restore_window_state() {
   if [[ -f "$WINDOW_STATE_FILE" ]]; then
@@ -243,9 +277,9 @@ if kill -0 ${GST_PID} 2>/dev/null; then
   log "Preview is running successfully in the background"
   log "Terminal is now free for other commands"
   
-  # Apply window state synchronously and save window state in background
+  # Apply window state synchronously and monitor window state changes
   apply_window_state ${GST_PID} &
-  (save_window_state ${GST_PID}) &
+  (monitor_window_state ${GST_PID}) &
 else
   err "GStreamer failed to start properly"
   exit 1

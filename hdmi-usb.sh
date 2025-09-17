@@ -283,7 +283,28 @@ if kill -0 ${GST_PID} 2>/dev/null; then
   
   # Apply window state in background and monitor window state changes
   log "Starting window restoration in background..."
-  (apply_window_state ${GST_PID}) &
+  
+  # Create a temporary script for restoration to ensure proper environment
+  cat > /tmp/hdmi-restore-$$.sh << EOF
+#!/bin/bash
+export RESTORE_X="${RESTORE_X:-}"
+export RESTORE_Y="${RESTORE_Y:-}"
+export RESTORE_WIDTH="${RESTORE_WIDTH:-}"
+export RESTORE_HEIGHT="${RESTORE_HEIGHT:-}"
+
+# Wait for window to appear
+sleep 2
+window_id=\$(xwininfo -name "gst-launch-1.0" 2>/dev/null | grep "Window id:" | awk '{print \$4}' || true)
+
+if [[ -n "\$window_id" && -n "\$RESTORE_X" && -n "\$RESTORE_Y" ]]; then
+  wmctrl -i -r "\$window_id" -e "0,\$RESTORE_X,\$RESTORE_Y,\$RESTORE_WIDTH,\$RESTORE_HEIGHT" 2>/dev/null || true
+  echo "[INFO] Window restored to: \$RESTORE_X,\$RESTORE_Y"
+fi
+EOF
+  
+  chmod +x /tmp/hdmi-restore-$$.sh
+  /tmp/hdmi-restore-$$.sh &
+  
   (monitor_window_state ${GST_PID}) &
 else
   err "GStreamer failed to start properly"

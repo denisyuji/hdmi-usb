@@ -107,12 +107,59 @@ alsa_card_for_usb_tail() {
     local full
     full="$(readlink -f "$path/device" 2>/dev/null || true)"
     [[ -z "$full" ]] && continue
-    if echo "$full" | grep -q "$usb_tail"; then
-      basename "$path" | sed 's/^card//'
-      return 0
+    
+    # Extract USB device path from audio card path
+    local audio_usb_tail
+    audio_usb_tail=$(echo "$full" | grep -oE '[0-9]+-[0-9.]+' | tail -n1)
+    
+    # Match must be exact on the USB device path (before the interface number)
+    # Both paths should contain the same base USB device identifier
+    if [[ "$audio_usb_tail" == "$usb_tail" ]]; then
+      local card_num
+      card_num=$(basename "$path" | sed 's/^card//')
+      
+      # Verify this card has a capture device (pcmC*D*c)
+      if compgen -G "/proc/asound/card${card_num}/pcm*c" >/dev/null 2>&1; then
+        echo "$card_num"
+        return 0
+      else
+        log "Warning: Found audio card ${card_num} on same USB device, but it has no capture devices"
+        return 1
+      fi
     fi
   done
   return 1
+}
+
+verify_audio_card() {
+  local card_num="$1"
+  
+  # Get card name/description
+  local card_info
+  if [[ -f "/proc/asound/card${card_num}/id" ]]; then
+    card_info=$(cat "/proc/asound/card${card_num}/id" 2>/dev/null || echo "unknown")
+    log "Audio card ${card_num} ID: ${card_info}"
+  fi
+  
+  # Verify the card has capture capability
+  if ! compgen -G "/proc/asound/card${card_num}/pcm*c" >/dev/null 2>&1; then
+    err "Audio card ${card_num} does not support capture"
+    return 1
+  fi
+  
+  # Check if the card is actually USB-based (additional verification)
+  local card_path="/sys/class/sound/card${card_num}/device"
+  if [[ -e "$card_path" ]]; then
+    local device_path
+    device_path=$(readlink -f "$card_path" 2>/dev/null || true)
+    if [[ -n "$device_path" ]] && echo "$device_path" | grep -q "usb"; then
+      log "Verified: Audio card ${card_num} (${card_info}) is a USB device with capture capability"
+      return 0
+    fi
+  fi
+  
+  log "Warning: Could not verify audio card ${card_num} as a USB capture device"
+  return 0  # Still allow it to work
 }
 
 pick_nodes_by_name() {
@@ -164,11 +211,22 @@ AUDIO_CARD=""
 if [[ -n "${AUDIO_FORCE_CARD}" ]]; then
   AUDIO_CARD="${AUDIO_FORCE_CARD}"
   log "Forcing ALSA card: ${AUDIO_CARD}"
+  if ! verify_audio_card "${AUDIO_CARD}"; then
+    err "Forced audio card ${AUDIO_FORCE_CARD} failed verification"
+    AUDIO_CARD=""
+  fi
 else
   USB_TAIL="$(usb_tail_for_video "${VIDEO_DEV}" || true)"
   if [[ -n "${USB_TAIL:-}" ]]; then
+    log "USB path for video device: ${USB_TAIL}"
     if AUDIO_CARD="$(alsa_card_for_usb_tail "$USB_TAIL" || true)"; then
       log "Matched ALSA card by USB path: card ${AUDIO_CARD}"
+      if verify_audio_card "${AUDIO_CARD}"; then
+        log "Audio verification passed - audio is from the USB HDMI capture device"
+      else
+        err "Audio card verification failed"
+        AUDIO_CARD=""
+      fi
     else
       log "No ALSA card matched USB path (${USB_TAIL}). Running video-only."
     fi
@@ -313,9 +371,23 @@ apply_window_state() {
 restore_window_state
 
 if [[ -n "${AUDIO_CARD}" ]]; then
+  # Get audio card name for user information
+  AUDIO_CARD_NAME="unknown"
+  if [[ -f "/proc/asound/card${AUDIO_CARD}/id" ]]; then
+    AUDIO_CARD_NAME=$(cat "/proc/asound/card${AUDIO_CARD}/id" 2>/dev/null || echo "unknown")
+  fi
+  
   GST_AUDIO="alsasrc device=hw:${AUDIO_CARD},0 ! audioconvert ! audioresample ! autoaudiosink sync=false"
-  log "Launching A/V preview in background (video=${VIDEO_DEV}, audio=hw:${AUDIO_CARD},0)"
+  log "Launching A/V preview in background"
+  log "  Video: ${VIDEO_DEV}"
+  log "  Audio: hw:${AUDIO_CARD},0 (${AUDIO_CARD_NAME})"
   log "GStreamer command: gst-launch-1.0 ${GST_VIDEO} ${GST_AUDIO}"
+  
+  # Always show audio source info to user, even in non-debug mode
+  if [[ "$DEBUG_MODE" == "false" ]]; then
+    echo "[INFO] Using audio from USB HDMI capture device (card ${AUDIO_CARD}: ${AUDIO_CARD_NAME})"
+  fi
+  
   if [[ "$DEBUG_MODE" == "true" ]]; then
     gst-launch-1.0 ${GST_VIDEO} ${GST_AUDIO} &
   else
@@ -327,6 +399,12 @@ if [[ -n "${AUDIO_CARD}" ]]; then
 else
   log "Launching video-only preview in background (video=${VIDEO_DEV})"
   log "GStreamer command: gst-launch-1.0 ${GST_VIDEO}"
+  
+  # Show info to user that audio is not available
+  if [[ "$DEBUG_MODE" == "false" ]]; then
+    echo "[INFO] No audio device found for USB HDMI capture - running video only"
+  fi
+  
   if [[ "$DEBUG_MODE" == "true" ]]; then
     gst-launch-1.0 ${GST_VIDEO} &
   else

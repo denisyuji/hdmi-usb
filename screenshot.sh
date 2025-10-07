@@ -141,9 +141,14 @@ OUTPUT_FILE="${OUTPUT_DIR}/screenshot_${TIMESTAMP}.png"
 
 log "Capturing snapshot to: ${OUTPUT_FILE}"
 
-# Build GStreamer pipeline to capture a single frame
-# Capture a few buffers to ensure we get a complete frame, then use videorate to limit to 1
-GST_PIPELINE="v4l2src device=${VIDEO_DEV} num-buffers=2 ! image/jpeg ! jpegdec ! videoconvert ! videorate ! video/x-raw,framerate=1/1 ! videoconvert ! pngenc ! filesink location=${OUTPUT_FILE}"
+# Build GStreamer pipeline to capture multiple frames
+# Capture enough frames to let the device stabilize (typically 5-10 seconds)
+# Save all frames to temp files, then keep only the last one
+TEMP_DIR=$(mktemp -d)
+TEMP_PATTERN="${TEMP_DIR}/frame_%05d.png"
+
+# Capture 100 frames (10 seconds at 10fps, or ~1.6 seconds at 60fps)
+GST_PIPELINE="v4l2src device=${VIDEO_DEV} num-buffers=100 ! image/jpeg ! jpegdec ! videoconvert ! pngenc ! multifilesink location=${TEMP_PATTERN}"
 
 log "GStreamer pipeline: gst-launch-1.0 ${GST_PIPELINE}"
 
@@ -153,6 +158,16 @@ if [[ "$DEBUG_MODE" == "true" ]]; then
 else
   gst-launch-1.0 ${GST_PIPELINE} >/dev/null 2>&1
 fi
+
+# Find and move the last frame to the output location
+LAST_FRAME=$(ls -1 "${TEMP_DIR}"/frame_*.png 2>/dev/null | tail -1)
+if [[ -n "$LAST_FRAME" ]]; then
+  mv "$LAST_FRAME" "$OUTPUT_FILE"
+  log "Moved last frame: $LAST_FRAME -> $OUTPUT_FILE"
+fi
+
+# Clean up temporary directory
+rm -rf "$TEMP_DIR"
 
 # Check if file was created successfully
 if [[ -f "$OUTPUT_FILE" ]]; then

@@ -43,7 +43,7 @@ EXAMPLES:
     $0 -o ~/Pictures     # Capture snapshot to ~/Pictures directory
 
 OUTPUT:
-    Snapshots are saved as: snapshot_YYYYMMDD_HHMMSS.png
+    Screenshots are saved as: screenshot_YYYYMMDD_HHMMSS.png
 
 EOF
 }
@@ -137,7 +137,7 @@ fi
 # --- Capture snapshot ------------------------------------------------------
 # Generate timestamp for filename
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-OUTPUT_FILE="${OUTPUT_DIR}/snapshot_${TIMESTAMP}.png"
+OUTPUT_FILE="${OUTPUT_DIR}/screenshot_${TIMESTAMP}.png"
 
 log "Capturing snapshot to: ${OUTPUT_FILE}"
 

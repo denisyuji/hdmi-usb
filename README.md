@@ -64,7 +64,7 @@ Scripts to detect and preview MacroSilicon USB HDMI capture devices using GStrea
 
 #### Output
 
-Snapshots are saved as: `snapshot_YYYYMMDD_HHMMSS.png`
+Screenshots are saved as: `screenshot_YYYYMMDD_HHMMSS.png`
 
 On success, the script outputs only the file path to stdout, making it easy to use in scripts:
 

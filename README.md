@@ -1,6 +1,6 @@
 # HDMI USB Capture
 
-A simple script to detect and preview MacroSilicon USB HDMI capture devices using GStreamer.
+Scripts to detect and preview MacroSilicon USB HDMI capture devices using GStreamer.
 
 ## Features
 
@@ -9,10 +9,13 @@ A simple script to detect and preview MacroSilicon USB HDMI capture devices usin
 - **Window state persistence** - remembers window position and size
 - **Silent operation** - no output by default (use `--debug` for logs)
 - **Audio support** - automatically detects and uses audio from capture device
+- **Snapshot capture** - take single frame screenshots with timestamp
 - **Debug mode** - verbose logging for troubleshooting
 - **Help system** - built-in usage information
 
 ## Usage
+
+### Live Preview (hdmi-usb.sh)
 
 ```bash
 # Start HDMI capture preview (silent mode)
@@ -31,11 +34,47 @@ A simple script to detect and preview MacroSilicon USB HDMI capture devices usin
 ./install.sh
 ```
 
-### Command Line Options
+#### Command Line Options
 
 - `-d, --debug` - Enable debug mode (show application and GStreamer logs)
 - `-h, --help` - Show help message
 - `--reset-window` - Reset saved window position and size
+
+### Snapshot Capture (snapshot.sh)
+
+```bash
+# Capture snapshot to current directory
+./snapshot.sh
+
+# Capture to specific directory
+./snapshot.sh -o ~/Pictures
+
+# Capture with debug output
+./snapshot.sh --debug
+
+# Show help information
+./snapshot.sh --help
+```
+
+#### Command Line Options
+
+- `-d, --debug` - Enable debug mode (show GStreamer logs)
+- `-h, --help` - Show help message
+- `-o, --output DIR` - Output directory for snapshot (default: current directory)
+
+#### Output
+
+Snapshots are saved as: `snapshot_YYYYMMDD_HHMMSS.png`
+
+On success, the script outputs only the file path to stdout, making it easy to use in scripts:
+
+```bash
+# Example: capture and open in image viewer
+feh "$(./snapshot.sh)"
+
+# Example: capture multiple snapshots
+for i in {1..5}; do ./snapshot.sh -o ~/captures; sleep 2; done
+```
 
 ## Requirements
 

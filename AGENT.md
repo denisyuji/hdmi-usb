@@ -15,6 +15,16 @@ This project provides automated HDMI capture device detection and preview functi
 - **Debug Mode**: `--debug` flag enables verbose logging for troubleshooting
 - **Help System**: `--help` flag provides usage information
 
+### snapshot.sh
+- **Device Detection**: Reuses same device detection logic as hdmi-usb.sh
+- **Single Frame Capture**: Uses `num-buffers=1` to capture exactly one frame
+- **GStreamer Pipeline**: `v4l2src → decodebin → videoconvert → pngenc → filesink`
+- **Timestamp Naming**: Saves files as `snapshot_YYYYMMDD_HHMMSS.png`
+- **Clean Output**: Returns only file path on success (stdout)
+- **Output Directory**: Configurable via `-o` flag (default: current directory)
+- **Debug Mode**: `--debug` flag enables verbose logging
+- **Help System**: `--help` flag provides usage information
+
 ### install.sh
 - **System Installation**: Copies script to `~/.local/bin/hdmi-usb`
 - **PATH Management**: Automatically adds `~/.local/bin` to shell PATH

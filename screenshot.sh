@@ -142,8 +142,8 @@ OUTPUT_FILE="${OUTPUT_DIR}/snapshot_${TIMESTAMP}.png"
 log "Capturing snapshot to: ${OUTPUT_FILE}"
 
 # Build GStreamer pipeline to capture a single frame
-# num-buffers=1 ensures we capture only one frame
-GST_PIPELINE="v4l2src device=${VIDEO_DEV} num-buffers=1 ! queue ! decodebin ! videoconvert ! pngenc ! filesink location=${OUTPUT_FILE}"
+# Capture a few buffers to ensure we get a complete frame, then use videorate to limit to 1
+GST_PIPELINE="v4l2src device=${VIDEO_DEV} num-buffers=2 ! image/jpeg ! jpegdec ! videoconvert ! videorate ! video/x-raw,framerate=1/1 ! videoconvert ! pngenc ! filesink location=${OUTPUT_FILE}"
 
 log "GStreamer pipeline: gst-launch-1.0 ${GST_PIPELINE}"
 

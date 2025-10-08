@@ -80,7 +80,11 @@ fi
 is_video_hdmi_usb() {
   local dev="$1"
   local info
-  info="$(v4l2-ctl -d "$dev" --all 2>/dev/null || true)"
+  # Capture stderr to detect busy state
+  info="$(v4l2-ctl -d "$dev" --all 2>&1 || true)"
+  if echo "$info" | grep -qi "Device or resource busy"; then
+    return 2  # Device is busy but exists
+  fi
   [[ -z "$info" ]] && return 1
   # Check for Video Capture capability (common for HDMI capture devices)
   echo "$info" | grep -q "Video Capture" || return 1
@@ -110,13 +114,26 @@ pick_nodes_by_name() {
 
 # --- Detect video node -----------------------------------------------------
 VIDEO_DEV=""
-while read -r node; do
-  [[ -z "$node" ]] && continue
-  if is_video_hdmi_usb "$node"; then
-    VIDEO_DEV="$node"
-    break
-  fi
-done < <(pick_nodes_by_name)
+# Retry detection briefly to handle transient BUSY states
+for attempt in 1 2 3; do
+  while read -r node; do
+    [[ -z "$node" ]] && continue
+    if is_video_hdmi_usb "$node"; then
+      VIDEO_DEV="$node"
+      break
+    else
+      rc=$?
+      if [[ $rc -eq 2 ]]; then
+        # Device is busy but exists, accept it and proceed
+        VIDEO_DEV="$node"
+        log "Device $node is busy but will be used"
+        break
+      fi
+    fi
+  done < <(pick_nodes_by_name)
+  [[ -n "$VIDEO_DEV" ]] && break
+  sleep 0.5
+done
 
 if [[ -z "$VIDEO_DEV" ]]; then
   err "Could not find a MacroSilicon USB Video HDMI capture device"
@@ -152,11 +169,24 @@ GST_PIPELINE="v4l2src device=${VIDEO_DEV} num-buffers=100 ! image/jpeg ! jpegdec
 
 log "GStreamer pipeline: gst-launch-1.0 ${GST_PIPELINE}"
 
-# Execute GStreamer command
+# Cleanup function to ensure device is released
+cleanup_device() {
+  if [[ -n "${VIDEO_DEV:-}" ]]; then
+    # Force release the device by resetting v4l2 controls
+    v4l2-ctl -d "${VIDEO_DEV}" --set-fmt-video=width=1920,height=1080,pixelformat=MJPG >/dev/null 2>&1 || true
+    # Small delay to let device settle
+    sleep 0.1
+  fi
+}
+
+# Set up trap to ensure cleanup on exit
+trap cleanup_device EXIT
+
+# Execute GStreamer command with timeout
 if [[ "$DEBUG_MODE" == "true" ]]; then
-  gst-launch-1.0 ${GST_PIPELINE}
+  timeout 10 gst-launch-1.0 ${GST_PIPELINE}
 else
-  gst-launch-1.0 ${GST_PIPELINE} >/dev/null 2>&1
+  timeout 10 gst-launch-1.0 ${GST_PIPELINE} >/dev/null 2>&1
 fi
 
 # Find and move the last frame to the output location
@@ -168,6 +198,9 @@ fi
 
 # Clean up temporary directory
 rm -rf "$TEMP_DIR"
+
+# Explicitly cleanup device before proceeding
+cleanup_device
 
 # Check if file was created successfully
 if [[ -f "$OUTPUT_FILE" ]]; then

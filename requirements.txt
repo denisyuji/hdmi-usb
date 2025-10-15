@@ -1,0 +1,19 @@
+# HDMI USB Capture Python Dependencies
+# 
+# This script primarily uses Python standard library modules:
+# - subprocess: for running system commands (v4l2-ctl, gst-launch-1.0, etc.)
+# - argparse: for command-line argument parsing
+# - pathlib: for file path operations
+# - re: for regular expression matching
+# - threading: for background window monitoring
+# - os, sys, time, signal: for system operations
+#
+# No external PyPI packages are required.
+# However, system packages must be installed:
+# - gstreamer1.0-tools
+# - gstreamer1.0-plugins-base
+# - gstreamer1.0-plugins-good
+# - v4l-utils (for v4l2-ctl)
+# - wmctrl (for window positioning)
+# - x11-utils (for xwininfo)
+

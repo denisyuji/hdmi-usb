@@ -15,8 +15,11 @@ Scripts to detect and preview MacroSilicon USB HDMI capture devices using GStrea
 
 ## Usage
 
-### Live Preview (hdmi-usb.sh)
+### Live Preview
 
+The tool is available in both Bash and Python versions with identical features:
+
+**Bash Version (hdmi-usb.sh)**
 ```bash
 # Start HDMI capture preview (silent mode)
 ./hdmi-usb.sh
@@ -32,6 +35,21 @@ Scripts to detect and preview MacroSilicon USB HDMI capture devices using GStrea
 
 # Install system-wide
 ./install.sh
+```
+
+**Python Version (hdmi-usb.py)**
+```bash
+# Start HDMI capture preview (silent mode)
+./hdmi-usb.py
+
+# Start with debug output
+./hdmi-usb.py --debug
+
+# Show help information
+./hdmi-usb.py --help
+
+# Reset window position to default
+./hdmi-usb.py --reset-window
 ```
 
 #### Command Line Options
@@ -83,6 +101,7 @@ for i in {1..5}; do ./snapshot.sh -o ~/captures; sleep 2; done
 - v4l2-ctl
 - wmctrl (for window positioning)
 - MacroSilicon USB HDMI capture device
+- Python 3.6+ (for Python version only)
 
 ### Installing Dependencies on Ubuntu
 
@@ -91,9 +110,14 @@ for i in {1..5}; do ./snapshot.sh -o ~/captures; sleep 2; done
 sudo apt update
 sudo apt install gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav v4l-utils wmctrl
 
+# For Python version (Python 3 is usually pre-installed on Ubuntu)
+sudo apt install python3
+
 # Optional: Install additional GStreamer plugins for better codec support
 sudo apt install gstreamer1.0-vaapi gstreamer1.0-plugins-base-apps
 ```
+
+**Note:** The Python version (`hdmi-usb.py`) uses only Python standard library modules and requires no PyPI packages. See `requirements.txt` for details.
 
 ## Installation
 

@@ -6,7 +6,20 @@ This project provides automated HDMI capture device detection and preview functi
 
 ## Key Components
 
-### hdmi-usb.sh
+### hdmi-usb.sh / hdmi-usb.py
+The tool is available in both Bash and Python versions with identical features:
+
+**Bash Version (hdmi-usb.sh)**
+- Original implementation in Bash
+- Uses subprocess calls to system utilities
+
+**Python Version (hdmi-usb.py)**
+- Object-oriented implementation in Python 3
+- Uses only Python standard library (no external PyPI dependencies)
+- Better code organization with HDMICapture class
+- Threading for background window monitoring
+
+**Common Features:**
 - **Device Detection**: Uses `v4l2-ctl` to identify MacroSilicon USB Video devices
 - **Resolution Filtering**: Ensures device supports high-resolution capture (1920x1080/1280x720)
 - **GStreamer Pipeline**: `v4l2src → decodebin → videoconvert → videoscale → ximagesink`
@@ -14,6 +27,7 @@ This project provides automated HDMI capture device detection and preview functi
 - **Background Execution**: Runs GStreamer silently without blocking terminal
 - **Debug Mode**: `--debug` flag enables verbose logging for troubleshooting
 - **Help System**: `--help` flag provides usage information
+- **Window State Persistence**: Monitors and saves window position/size changes in real-time
 
 ### snapshot.sh
 - **Device Detection**: Reuses same device detection logic as hdmi-usb.sh

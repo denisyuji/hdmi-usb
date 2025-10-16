@@ -212,15 +212,31 @@ class HDMIDeviceDetector:
         return None
 
 class LoopMediaFactory(GstRtspServer.RTSPMediaFactory):
-  def __init__(self, video_device=None, audio_card=None, audio_only=False, debug_mode=False):
+  def __init__(self, video_device=None, audio_card=None, audio_only=False, debug_mode=False, server=None):
     super(LoopMediaFactory, self).__init__()
     self.video_device = video_device
     self.audio_card = audio_card
     self.audio_only = audio_only
     self.debug_mode = debug_mode
-    self.set_shared(True)
+    self.server = server  # Reference to RTSPServer for error handling
+    self.set_shared(True)  # Share pipelines to avoid audio/video device conflicts
 
+  def check_mjpeg_support(self):
+    """Check if the video device supports MJPEG format."""
+    try:
+      import subprocess
+      result = subprocess.run(
+        ['v4l2-ctl', '-d', self.video_device, '--list-formats-ext'],
+        capture_output=True,
+        text=True,
+        timeout=5
+      )
+      return 'MJPG' in result.stdout or 'MJPEG' in result.stdout
+    except Exception:
+      return True  # Assume MJPEG is supported if we can't check
+  
   def do_create_element(self, url):
+    """Create GStreamer pipeline element."""
     # Validate devices
     if not self.video_device and not self.audio_only:
       print("❌ ERROR: No video device specified!")
@@ -230,81 +246,138 @@ class LoopMediaFactory(GstRtspServer.RTSPMediaFactory):
       print("❌ ERROR: Audio-only mode requires audio card!")
       return None
     
+    # Check if device supports MJPEG
+    mjpeg_supported = self.check_mjpeg_support()
+    
     if self.audio_only:
       # Audio-only pipeline using ALSA source
       pipeline_str = (
-        f'alsasrc device=hw:{self.audio_card},0 ! '
+        f'alsasrc device=plughw:{self.audio_card},0 ! '
         'queue max-size-time=1000000000 ! '
         'audioconvert ! audioresample ! audio/x-raw,format=S16LE,rate=48000,channels=2 ! '
-        'voaacenc bitrate=128000 ! rtpmp4gpay name=pay1'
+        'voaacenc bitrate=128000 ! rtpmp4gpay pt=97 name=pay0'
       )
-      if self.debug_mode:
-        print(f"[DEBUG] Audio-only pipeline: {pipeline_str}")
     else:
-      # Video + Audio pipeline
-      video_pipeline = (
-        f'v4l2src device={self.video_device} ! '
-        'queue ! decodebin ! videoconvert ! video/x-raw,format=I420 ! '
-        'x264enc tune=zerolatency key-int-max=30 bitrate=3000 speed-preset=veryfast byte-stream=true threads=1 ! '
-        'h264parse config-interval=1 ! '
-        'video/x-h264,stream-format=avc,alignment=au ! '
-        'rtph264pay config-interval=1 name=pay0'
-      )
+      # Video + Audio pipeline - use MJPEG if supported, otherwise fallback to decodebin
+      if mjpeg_supported:
+        video_pipeline = (
+          f'v4l2src device={self.video_device} ! '
+          'image/jpeg ! jpegdec ! videoconvert ! video/x-raw,format=I420 ! '
+          'x264enc tune=zerolatency key-int-max=30 bitrate=3000 speed-preset=veryfast byte-stream=true threads=1 ! '
+          'h264parse config-interval=1 ! '
+          'video/x-h264,stream-format=avc,alignment=au ! '
+          'rtph264pay config-interval=1 pt=96 name=pay0'
+        )
+      else:
+        video_pipeline = (
+          f'v4l2src device={self.video_device} ! '
+          'queue ! decodebin ! videoconvert ! video/x-raw,format=I420 ! '
+          'x264enc tune=zerolatency key-int-max=30 bitrate=3000 speed-preset=veryfast byte-stream=true threads=1 ! '
+          'h264parse config-interval=1 ! '
+          'video/x-h264,stream-format=avc,alignment=au ! '
+          'rtph264pay config-interval=1 pt=96 name=pay0'
+        )
       
       if self.audio_card:
         # Video + Audio
         audio_pipeline = (
-          f'alsasrc device=hw:{self.audio_card},0 ! '
+          f'alsasrc device=dsnoop:{self.audio_card},0 ! '
           'queue max-size-time=1000000000 ! '
           'audioconvert ! audioresample ! audio/x-raw,format=S16LE,rate=48000,channels=2 ! '
-          'voaacenc bitrate=128000 ! rtpmp4gpay name=pay1'
+          'voaacenc bitrate=128000 ! rtpmp4gpay pt=97 name=pay1'
         )
         pipeline_str = f'{video_pipeline} {audio_pipeline}'
-        if self.debug_mode:
-          print(f"[DEBUG] Video+Audio pipeline: {pipeline_str}")
       else:
         # Video only
         pipeline_str = video_pipeline
-        if self.debug_mode:
-          print(f"[DEBUG] Video-only pipeline: {pipeline_str}")
-
+    
+    if self.debug_mode:
+      print(f"[DEBUG] Pipeline: {pipeline_str}")
+    
     try:
       element = Gst.parse_launch(pipeline_str)
       if not element:
         print("❌ ERROR: Pipeline is NULL after parse_launch!")
+        if self.server:
+          self.server.on_pipeline_error("Pipeline is NULL after parse_launch")
         return None
-      
-      if self.debug_mode:
-        print(f"[DEBUG] Successfully created GStreamer pipeline")
       
       return element
     except Exception as e:
-      print(f"❌ ERROR: Failed to create pipeline: {e}")
+      error_msg = f"Failed to create pipeline: {e}"
+      print(f"❌ ERROR: {error_msg}")
+      if self.server:
+        self.server.on_pipeline_error(error_msg)
       return None
-
+  
   def do_configure(self, media):
+    """Configure media and monitor for errors."""
     media.connect("prepared", self.on_media_prepared)
-
+    media.connect("target-state", self.on_target_state)
+    media.connect("new-state", self.on_new_state)
+    
   def on_media_prepared(self, media):
+    """Called when media is prepared - set up bus monitoring."""
     element = media.get_element()
+    if not element:
+      if self.server:
+        self.server.on_pipeline_error("Media element is NULL after preparation")
+      return
+    
     bus = element.get_bus()
-    bus.add_signal_watch()
-    bus.connect("message", self.on_bus_message, media)
-
+    if bus:
+      bus.add_signal_watch()
+      bus.connect("message", self.on_bus_message, media)
+  
+  def on_target_state(self, media, state):
+    """Monitor target state changes."""
+    if self.debug_mode:
+      print(f"[DEBUG] Media target state: {state}")
+    return True
+  
+  def on_new_state(self, media, state):
+    """Monitor actual state changes and detect failures."""
+    if self.debug_mode:
+      print(f"[DEBUG] Media new state: {state}")
+    
+    # If we're in NULL or READY state after trying to prepare, something went wrong
+    if state == Gst.State.NULL:
+      element = media.get_element()
+      if element:
+        # Check the bus for error messages
+        bus = element.get_bus()
+        if bus:
+          msg = bus.pop_filtered(Gst.MessageType.ERROR)
+          if msg:
+            err, dbg = msg.parse_error()
+            if self.server:
+              self.server.on_pipeline_error(f"Media failed to start: {err.message}")
+    
+    return True
+  
   def on_bus_message(self, bus, message, media):
+    """Monitor bus messages for errors."""
     t = message.type
     if t == Gst.MessageType.ERROR:
       err, dbg = message.parse_error()
-      print(f"❌ Pipeline ERROR: {err}, Debug: {dbg}")
+      error_msg = f"{err.message}"
+      print(f"❌ GStreamer Pipeline ERROR: {error_msg}")
+      if self.debug_mode:
+        print(f"   Debug: {dbg}")
+      
+      # Report critical errors to server
+      if self.server and ("resource busy" in error_msg.lower() or 
+                         "failed to" in error_msg.lower() or
+                         "cannot" in error_msg.lower()):
+        self.server.on_pipeline_error(error_msg)
+    
     elif t == Gst.MessageType.WARNING:
       warn, dbg = message.parse_warning()
       if self.debug_mode:
-        print(f"⚠️ Pipeline WARNING: {warn}, Debug: {dbg}")
-    elif self.debug_mode and t == Gst.MessageType.STATE_CHANGED:
-      old_state, new_state, pending_state = message.parse_state_changed()
-      if message.src == media.get_element():
-        print(f"[DEBUG] Pipeline state changed: {old_state.value_nick} -> {new_state.value_nick}")
+        print(f"⚠️  Pipeline WARNING: {warn.message}")
+    
     return True
+
 
 class RTSPServer(GstRtspServer.RTSPServer):
   def __init__(self, audio_only=False, debug_mode=False):
@@ -312,6 +385,8 @@ class RTSPServer(GstRtspServer.RTSPServer):
     self.port = "1234"
     self.endpoint = "/hdmi"
     self.debug_mode = debug_mode
+    self.main_loop = None  # Will be set later
+    self.pipeline_errors = 0  # Track pipeline errors
     self.set_address("0.0.0.0")
     self.set_service(self.port)
     
@@ -342,11 +417,13 @@ class RTSPServer(GstRtspServer.RTSPServer):
       video_device=video_device,
       audio_card=audio_card,
       audio_only=audio_only,
-      debug_mode=debug_mode
+      debug_mode=debug_mode,
+      server=self  # Pass server reference for error handling
     )
     self.factory.set_eos_shutdown(False)
-    self.factory.set_stop_on_disconnect(False)
+    self.factory.set_stop_on_disconnect(False)  # Keep pipeline running for multiple clients
     self.factory.set_transport_mode(GstRtspServer.RTSPTransportMode.PLAY)
+    self.factory.set_latency(200)  # 200ms latency for better compatibility
     
     mount_points = self.get_mount_points()
     mount_points.add_factory(self.endpoint, self.factory)
@@ -366,6 +443,21 @@ class RTSPServer(GstRtspServer.RTSPServer):
   def on_client_disconnected(self, client):
     ip = client.get_connection().get_ip()
     print(f"[{timestamp()}] ❌ Client disconnected: {ip}")
+  
+  def on_pipeline_error(self, error_msg):
+    """Handle pipeline errors by shutting down the server."""
+    self.pipeline_errors += 1
+    print(f"❌ Pipeline Error #{self.pipeline_errors}: {error_msg}")
+    
+    # Terminate after first critical error
+    if self.pipeline_errors >= 1:
+      print(f"[{timestamp()}] 💥 Critical pipeline failure - shutting down server")
+      if self.main_loop:
+        GLib.idle_add(self.main_loop.quit)
+  
+  def set_main_loop(self, loop):
+    """Set the main loop reference for error handling."""
+    self.main_loop = loop
 
 if __name__ == '__main__':
   parser = argparse.ArgumentParser(
@@ -376,15 +468,28 @@ DESCRIPTION:
     Automatically detects MacroSilicon USB Video HDMI capture devices and
     streams live video/audio over RTSP. The server will auto-detect both
     video and audio devices from the same USB HDMI capture adapter.
+    
+    Default RTSP URL: rtsp://0.0.0.0:1234/hdmi
 
 EXAMPLES:
     %(prog)s                     # Stream video+audio (auto-detect devices)
     %(prog)s --audio-only        # Stream audio only (requires AUDIO_FORCE_CARD)
     %(prog)s --debug             # Enable debug output
     AUDIO_FORCE_CARD=1 %(prog)s  # Force specific audio card
+    
+    # Connect with ffplay (recommended)
+    ffplay -rtsp_transport tcp rtsp://127.0.0.1:1234/hdmi
+    
+    # Connect with GStreamer
+    gst-launch-1.0 rtspsrc location=rtsp://127.0.0.1:1234/hdmi ! decodebin ! autovideosink
 
 ENVIRONMENT VARIABLES:
     AUDIO_FORCE_CARD    Force specific ALSA audio card (e.g., AUDIO_FORCE_CARD=1)
+
+COMPATIBILITY:
+    ✅ Works with: ffplay, GStreamer, most RTSP clients
+    ⚠️  Known issues: VLC may have compatibility issues with RTSP SETUP requests
+                     (use ffplay or other RTSP clients instead)
     '''
   )
   parser.add_argument('--audio-only', action='store_true', help='Start RTSP server in audio-only mode')
@@ -399,6 +504,7 @@ ENVIRONMENT VARIABLES:
 
     server = RTSPServer(audio_only=args.audio_only, debug_mode=args.debug)
     loop = GLib.MainLoop()
+    server.set_main_loop(loop)  # Set loop reference for error handling
 
     def shutdown(sig, frame):
       print(f"\n[{timestamp()}] 👋 Shutting down RTSP server gracefully...")
@@ -410,6 +516,11 @@ ENVIRONMENT VARIABLES:
     print(f"[{timestamp()}] 🎬 HDMI capture RTSP server ready for connections")
     loop.run()
     
+    # Check if we exited due to pipeline errors
+    if server.pipeline_errors > 0:
+      print(f"\n❌ Server terminated due to {server.pipeline_errors} pipeline error(s)")
+      exit(1)
+    
   except RuntimeError as e:
     print(f"❌ ERROR: {e}")
     print("\n💡 TROUBLESHOOTING:")
@@ -417,6 +528,9 @@ ENVIRONMENT VARIABLES:
     print("   • Check that v4l2-ctl is installed: sudo apt install v4l-utils")
     print("   • For audio-only mode, set AUDIO_FORCE_CARD environment variable")
     print("   • Run with --debug for more detailed information")
+    print("\n📺 CLIENT COMPATIBILITY:")
+    print("   ✅ Recommended: ffplay -rtsp_transport tcp rtsp://127.0.0.1:1234/hdmi")
+    print("   ⚠️  VLC has known RTSP compatibility issues - use ffplay instead")
     exit(1)
   except KeyboardInterrupt:
     print(f"\n[{timestamp()}] 👋 Server stopped by user")

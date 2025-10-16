@@ -94,6 +94,49 @@ feh "$(./snapshot.sh)"
 for i in {1..5}; do ./snapshot.sh -o ~/captures; sleep 2; done
 ```
 
+### RTSP Server (rtsp-server.py)
+
+Stream HDMI capture over RTSP for remote viewing or recording.
+
+```bash
+# Start RTSP server (auto-detect devices)
+python3 rtsp-server.py
+
+# Start with debug output
+python3 rtsp-server.py --debug
+
+# Force specific audio card
+AUDIO_FORCE_CARD=1 python3 rtsp-server.py
+
+# Show help information
+python3 rtsp-server.py --help
+```
+
+#### Connecting to the RTSP Stream
+
+**Default RTSP URL:** `rtsp://127.0.0.1:1234/hdmi`
+
+**Recommended client (ffplay):**
+```bash
+ffplay -rtsp_transport tcp rtsp://127.0.0.1:1234/hdmi
+```
+
+**GStreamer:**
+```bash
+gst-launch-1.0 rtspsrc location=rtsp://127.0.0.1:1234/hdmi ! decodebin ! autovideosink
+```
+
+#### Client Compatibility
+
+- ✅ **Works with:** ffplay, GStreamer, most standards-compliant RTSP clients
+- ⚠️  **Known issues:** VLC may have compatibility issues with RTSP SETUP requests (use ffplay instead)
+
+#### Command Line Options
+
+- `--debug` - Enable debug output (shows GStreamer messages)
+- `--audio-only` - Stream audio only (requires AUDIO_FORCE_CARD environment variable)
+- `-h, --help` - Show help message
+
 ## Requirements
 
 - Linux with X11
@@ -101,7 +144,8 @@ for i in {1..5}; do ./snapshot.sh -o ~/captures; sleep 2; done
 - v4l2-ctl
 - wmctrl (for window positioning)
 - MacroSilicon USB HDMI capture device
-- Python 3.6+ (for Python version only)
+- Python 3.6+ (for Python version and RTSP server)
+- GStreamer RTSP Server library (for RTSP server only)
 
 ### Installing Dependencies on Ubuntu
 
@@ -113,8 +157,14 @@ sudo apt install gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugi
 # For Python version (Python 3 is usually pre-installed on Ubuntu)
 sudo apt install python3
 
+# For RTSP server
+sudo apt install gir1.2-gst-rtsp-server-1.0 python3-gi
+
 # Optional: Install additional GStreamer plugins for better codec support
 sudo apt install gstreamer1.0-vaapi gstreamer1.0-plugins-base-apps
+
+# Optional: Install ffplay for RTSP client testing
+sudo apt install ffmpeg
 ```
 
 **Note:** The Python version (`hdmi-usb.py`) uses only Python standard library modules and requires no PyPI packages. See `requirements.txt` for details.

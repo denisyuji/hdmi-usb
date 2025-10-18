@@ -37,6 +37,17 @@ AUDIO_BITRATE_BPS = 128000
 VIDEO_BITRATE_KBPS = 3000
 VIDEO_KEYFRAME_INTERVAL_FRAMES = 30
 
+def setup_gstreamer_debug():
+    """Setup GStreamer debug environment variables if debug mode is requested."""
+    import sys
+    if '--debug' in sys.argv:
+        # Set general debug level to 3, but suppress videodecoder warnings (level 1 = errors only)
+        os.environ['GST_DEBUG'] = '3,videodecoder:1'
+        os.environ['GST_DEBUG_NO_COLOR'] = '1'
+
+# Setup debug environment before GStreamer initialization
+setup_gstreamer_debug()
+
 Gst.init(None)
 
 # =============================================================================
@@ -1166,12 +1177,6 @@ COMPATIBILITY:
         help='Enable debug output'
     )
     args = parser.parse_args()
-    
-    # Set GStreamer debug level if debug mode is enabled
-    if args.debug:
-        # Set general debug level to 3, but suppress videodecoder warnings (level 1 = errors only)
-        os.environ['GST_DEBUG'] = '3,videodecoder:1'
-        os.environ['GST_DEBUG_NO_COLOR'] = '1'
     
     # Handle reset-window option
     if args.reset_window:

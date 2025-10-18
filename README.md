@@ -10,6 +10,9 @@ Scripts to detect and preview MacroSilicon USB HDMI capture devices using GStrea
 - **Silent operation** - no output by default (use `--debug` for logs)
 - **Audio support** - automatically detects and uses audio from capture device
 - **Snapshot capture** - take single frame screenshots with timestamp
+- **RTSP streaming** - stream live video/audio over network
+- **Local display window** - live preview with automatic video sharing
+- **Robust cleanup** - comprehensive resource management and cleanup
 - **Debug mode** - verbose logging for troubleshooting
 - **Help system** - built-in usage information
 
@@ -58,7 +61,11 @@ The tool is available in both Bash and Python versions with identical features:
 - `-h, --help` - Show help message
 - `--reset-window` - Reset saved window position and size
 
-### Snapshot Capture (snapshot.sh)
+### Snapshot Capture
+
+#### Direct Device Capture (snapshot.sh)
+
+Capture snapshots directly from the HDMI capture device.
 
 ```bash
 # Capture snapshot to current directory
@@ -74,17 +81,49 @@ The tool is available in both Bash and Python versions with identical features:
 ./snapshot.sh --help
 ```
 
+#### RTSP Stream Capture (screenshot-rtsp.sh)
+
+Capture snapshots from an active RTSP stream (requires RTSP server to be running).
+
+```bash
+# Capture from default RTSP stream
+./screenshot-rtsp.sh
+
+# Capture from custom RTSP URL
+RTSP_URL=rtsp://192.168.1.100:1234/hdmi ./screenshot-rtsp.sh
+
+# Capture to specific directory
+OUTPUT_DIR=~/Pictures ./screenshot-rtsp.sh
+
+# Capture with debug output
+./screenshot-rtsp.sh --debug
+
+# Show help information
+./screenshot-rtsp.sh --help
+```
+
 #### Command Line Options
 
+**snapshot.sh:**
 - `-d, --debug` - Enable debug mode (show GStreamer logs)
 - `-h, --help` - Show help message
 - `-o, --output DIR` - Output directory for snapshot (default: current directory)
+
+**screenshot-rtsp.sh:**
+- `-d, --debug` - Enable debug mode (show GStreamer logs)
+- `-h, --help` - Show help message
+
+#### Environment Variables
+
+**screenshot-rtsp.sh:**
+- `RTSP_URL` - RTSP stream URL (default: `rtsp://127.0.0.1:1234/hdmi`)
+- `OUTPUT_DIR` - Output directory for snapshots (default: current directory)
 
 #### Output
 
 Screenshots are saved as: `screenshot_YYYYMMDD_HHMMSS.png`
 
-On success, the script outputs only the file path to stdout, making it easy to use in scripts:
+On success, the scripts output only the file path to stdout, making it easy to use in scripts:
 
 ```bash
 # Example: capture and open in image viewer
@@ -92,18 +131,30 @@ feh "$(./snapshot.sh)"
 
 # Example: capture multiple snapshots
 for i in {1..5}; do ./snapshot.sh -o ~/captures; sleep 2; done
+
+# Example: capture from RTSP stream
+./screenshot-rtsp.sh -o ~/rtsp-captures
 ```
 
 ### RTSP Server (rtsp-server.py)
 
-Stream HDMI capture over RTSP for remote viewing or recording.
+Stream HDMI capture over RTSP for remote viewing or recording. Features local display window with automatic video sharing between local preview and RTSP clients.
 
 ```bash
-# Start RTSP server (auto-detect devices)
+# Start RTSP server with local display (default)
 python3 rtsp-server.py
 
 # Start with debug output
 python3 rtsp-server.py --debug
+
+# Start in headless mode (no local display window)
+python3 rtsp-server.py --headless
+
+# Stream audio only (requires AUDIO_FORCE_CARD)
+python3 rtsp-server.py --audio-only
+
+# Reset saved window position
+python3 rtsp-server.py --reset-window
 
 # Force specific audio card
 AUDIO_FORCE_CARD=1 python3 rtsp-server.py
@@ -134,8 +185,24 @@ gst-launch-1.0 rtspsrc location=rtsp://127.0.0.1:1234/hdmi ! decodebin ! autovid
 #### Command Line Options
 
 - `--debug` - Enable debug output (shows GStreamer messages)
+- `--headless` - Disable local display window (RTSP server only)
 - `--audio-only` - Stream audio only (requires AUDIO_FORCE_CARD environment variable)
+- `--reset-window` - Reset saved window position and size
 - `-h, --help` - Show help message
+
+#### Advanced Features
+
+- **Local Display Window**: Shows live preview with automatic window state persistence
+- **Video Sharing**: Uses intervideosink/src to share video between local display and RTSP clients
+- **Robust Cleanup**: Comprehensive cleanup system handles all termination scenarios
+- **Device Auto-detection**: Automatically finds and configures HDMI capture devices
+- **Audio Integration**: Detects and streams audio from the same USB device
+
+#### Environment Variables
+
+- `AUDIO_FORCE_CARD` - Force specific ALSA audio card (e.g., `AUDIO_FORCE_CARD=1`)
+- `RTSP_URL` - Custom RTSP stream URL for screenshot-rtsp.sh (default: `rtsp://127.0.0.1:1234/hdmi`)
+- `OUTPUT_DIR` - Output directory for RTSP screenshots (default: current directory)
 
 ## Requirements
 
@@ -181,4 +248,9 @@ After installation, use `hdmi-usb` command from anywhere.
 
 ## Window State
 
-The script automatically saves window position and size to `~/.hdmi-usb-window-state`. Use `--reset-window` to clear saved state.
+The scripts automatically save window position and size for restoration between sessions:
+
+- **Live Preview Scripts**: `~/.hdmi-usb-window-state`
+- **RTSP Server**: `~/.hdmi-usb-rtsp-window-state`
+
+Use `--reset-window` to clear saved state for any script.

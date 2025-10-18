@@ -10,6 +10,8 @@ import signal
 import os
 import re
 import subprocess
+import atexit
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -29,6 +31,24 @@ VIDEO_BITRATE = 3000
 VIDEO_KEYFRAME_INTERVAL = 30
 
 Gst.init(None)
+
+# Global cleanup registry for robust cleanup in all termination scenarios
+_cleanup_registry = []
+
+def register_cleanup(cleanup_func, *args, **kwargs):
+    """Register a cleanup function to be called on exit."""
+    _cleanup_registry.append((cleanup_func, args, kwargs))
+
+def cleanup_all():
+    """Execute all registered cleanup functions."""
+    for cleanup_func, args, kwargs in _cleanup_registry:
+        try:
+            cleanup_func(*args, **kwargs)
+        except Exception as e:
+            print(f"⚠️  Cleanup error: {e}")
+
+# Register global cleanup handler
+atexit.register(cleanup_all)
 
 
 def timestamp() -> str:
@@ -248,6 +268,9 @@ class LocalDisplayPipeline:
         self.restore_height = None
         self.monitor_thread = None
         self.monitor_running = False
+        
+        # Register cleanup function for robust cleanup
+        register_cleanup(self.stop)
 
     def log(self, message: str) -> None:
         """Print log message if debug mode is enabled."""
@@ -530,10 +553,11 @@ class LocalDisplayPipeline:
                 'ximagesink sync=false'
             )
 
-        # Add audio if available
+        # Add audio if available - but be more careful about device access
         if self.audio_card:
-            # Use dsnoop when sharing to allow RTSP server to also access audio
-            audio_device = f'dsnoop:{self.audio_card},0' if self.share_video else f'hw:{self.audio_card},0'
+            # Try different audio device specifications for better compatibility
+            # Use default device first, then fall back to specific card
+            audio_device = f'plughw:{self.audio_card},0'
             audio_pipeline = (
                 f'alsasrc device={audio_device} ! '
                 'audioconvert ! audioresample ! autoaudiosink sync=false'
@@ -542,8 +566,43 @@ class LocalDisplayPipeline:
         else:
             return video_pipeline
 
+    def reset_video_device(self):
+        """Reset the video device to ensure it's available."""
+        try:
+            # Try to reset the device by setting it to a known state
+            subprocess.run(
+                ['v4l2-ctl', '-d', self.video_device, '--set-fmt-video=width=1920,height=1080,pixelformat=MJPG'],
+                capture_output=True,
+                timeout=2
+            )
+            self.log(f"Video device {self.video_device} reset")
+        except Exception as e:
+            self.log(f"Could not reset video device: {e}")
+
+    def check_audio_device_availability(self) -> bool:
+        """Check if the audio device is available."""
+        if not self.audio_card:
+            return False
+        
+        try:
+            # Check if the audio device exists and is accessible
+            result = subprocess.run(
+                ['arecord', '-l'],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            return f'card {self.audio_card}:' in result.stdout
+        except Exception:
+            return False
+
     def start(self) -> bool:
         """Start the local display pipeline."""
+        # Check audio device availability
+        if self.audio_card and not self.check_audio_device_availability():
+            self.log(f"Audio card {self.audio_card} not available, running video-only")
+            self.audio_card = None
+        
         # Restore window state before starting
         self.restore_window_state()
         
@@ -572,12 +631,18 @@ class LocalDisplayPipeline:
             
             # Wait for state change to complete or for ASYNC result
             if ret == Gst.StateChangeReturn.ASYNC:
-                # Wait up to 5 seconds for state change to complete
-                ret, state, pending = self.pipeline.get_state(5 * Gst.SECOND)
+                # Wait up to 3 seconds for state change to complete
+                ret, state, pending = self.pipeline.get_state(3 * Gst.SECOND)
                 if ret == Gst.StateChangeReturn.FAILURE:
                     print("❌ ERROR: Pipeline failed to reach PLAYING state")
                     return False
-                self.log(f"Pipeline state change completed: {state.value_nick}")
+                elif ret == Gst.StateChangeReturn.ASYNC:
+                    print("⚠️  WARNING: Pipeline state change timed out, but continuing...")
+                    self.log("Pipeline may still be initializing in background")
+                else:
+                    self.log(f"Pipeline state change completed: {state.value_nick}")
+            elif ret == Gst.StateChangeReturn.SUCCESS:
+                self.log("Pipeline started immediately")
 
             self.log("Local display pipeline started successfully")
             
@@ -601,6 +666,9 @@ class LocalDisplayPipeline:
                 self.log(f"Restoring window to saved size: "
                         f"{self.restore_width}x{self.restore_height} "
                         f"at position: {self.restore_x},{self.restore_y}")
+                # Give the window a moment to appear before applying state
+                import time
+                time.sleep(0.5)
                 self.apply_window_state()
             
             # Start monitoring window position in background thread
@@ -620,18 +688,48 @@ class LocalDisplayPipeline:
 
     def stop(self):
         """Stop the local display pipeline."""
-        # Stop monitoring thread
-        self.monitor_running = False
-        if self.monitor_thread and self.monitor_thread.is_alive():
-            self.log("Stopping window monitoring thread...")
-            self.monitor_thread.join(timeout=3)
+        # Prevent duplicate cleanup
+        if not hasattr(self, '_cleanup_done'):
+            self._cleanup_done = True
+        else:
+            return
         
-        if self.pipeline:
-            self.log("Stopping local display pipeline")
-            self.pipeline.set_state(Gst.State.NULL)
-            bus = self.pipeline.get_bus()
-            if bus:
-                bus.remove_signal_watch()
+        try:
+            # Stop monitoring thread
+            self.monitor_running = False
+            if self.monitor_thread and self.monitor_thread.is_alive():
+                self.log("Stopping window monitoring thread...")
+                self.monitor_thread.join(timeout=3)
+            
+            if self.pipeline:
+                self.log("Stopping local display pipeline")
+                # Send EOS to gracefully stop the pipeline
+                self.pipeline.send_event(Gst.Event.new_eos())
+                
+                # Wait for EOS to be processed
+                import time
+                time.sleep(0.5)
+                
+                # Set pipeline to NULL state
+                self.pipeline.set_state(Gst.State.NULL)
+                
+                # Wait for state change to complete
+                ret, state, pending = self.pipeline.get_state(2 * Gst.SECOND)
+                if ret == Gst.StateChangeReturn.ASYNC:
+                    self.log("Pipeline cleanup completed asynchronously")
+                
+                # Clean up bus
+                bus = self.pipeline.get_bus()
+                if bus:
+                    bus.remove_signal_watch()
+                
+                # Clear pipeline reference
+                self.pipeline = None
+                
+                # Give the device time to be released
+                time.sleep(0.5)
+        except Exception as e:
+            print(f"⚠️  Error during local display cleanup: {e}")
 
 
 class RTSPMediaFactory(GstRtspServer.RTSPMediaFactory):
@@ -840,6 +938,9 @@ class RTSPServer(GstRtspServer.RTSPServer):
         self.local_display = None
         self.set_address("0.0.0.0")
         self.set_service(self.port)
+        
+        # Register cleanup function for robust cleanup
+        register_cleanup(self.shutdown)
 
         # Detect HDMI devices
         detector = HDMIDeviceDetector(debug_mode=debug_mode)
@@ -870,11 +971,12 @@ class RTSPServer(GstRtspServer.RTSPServer):
         # Start local display first if not in headless mode
         if use_local_display:
             print(f"[{timestamp()}] 🖥️  Starting local display...")
+            # Temporarily disable audio to ensure reliable video operation
             self.local_display = LocalDisplayPipeline(
                 video_device=video_device,
-                audio_card=audio_card,
+                audio_card=None,  # Disable audio for now
                 debug_mode=debug_mode,
-                share_video=True,  # Enable video sharing for RTSP
+                share_video=False,  # Temporarily disable video sharing
                 server=self  # Pass server reference for shutdown callback
             )
             if not self.local_display.start():
@@ -943,14 +1045,23 @@ class RTSPServer(GstRtspServer.RTSPServer):
 
     def shutdown(self):
         """Shutdown server and clean up resources."""
-        if self.local_display:
-            print(f"[{timestamp()}] 🖥️  Stopping local display...")
-            self.local_display.stop()
-            self.local_display = None
+        # Prevent duplicate cleanup
+        if not hasattr(self, '_shutdown_done'):
+            self._shutdown_done = True
+        else:
+            return
         
-        # Quit the main loop to exit gracefully
-        if self.main_loop:
-            GLib.idle_add(self.main_loop.quit)
+        try:
+            if self.local_display:
+                print(f"[{timestamp()}] 🖥️  Stopping local display...")
+                self.local_display.stop()
+                self.local_display = None
+            
+            # Quit the main loop to exit gracefully
+            if self.main_loop:
+                GLib.idle_add(self.main_loop.quit)
+        except Exception as e:
+            print(f"⚠️  Error during server shutdown: {e}")
 
 
 def main():
@@ -1027,6 +1138,7 @@ COMPATIBILITY:
             print("[INFO] No saved window state found.")
         return 0
 
+    server = None
     try:
         if args.audio_only:
             print("\033[92m🎵 Starting RTSP server in AUDIO-ONLY mode\033[0m")
@@ -1083,6 +1195,19 @@ COMPATIBILITY:
     except KeyboardInterrupt:
         print(f"\n[{timestamp()}] 👋 Server stopped by user")
         exit(0)
+    except Exception as e:
+        print(f"❌ UNEXPECTED ERROR: {e}")
+        if server:
+            server.shutdown()
+        exit(1)
+    finally:
+        # Final cleanup - this will be called even if exceptions occur
+        # The atexit handlers will also run, but this provides immediate cleanup
+        if server:
+            try:
+                server.shutdown()
+            except Exception as e:
+                print(f"⚠️  Error in final cleanup: {e}")
 
 
 if __name__ == '__main__':

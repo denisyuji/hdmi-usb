@@ -2,7 +2,14 @@
 """RTSP Server for HDMI USB Capture Devices
 
 Automatically detects MacroSilicon USB Video HDMI capture devices and
-streams live video/audio over RTSP.
+streams live video/audio over RTSP with local display window support.
+
+Key Features:
+- Auto-detection of HDMI capture devices
+- RTSP streaming with local preview window
+- Video sharing between local display and RTSP clients
+- Robust cleanup system for all termination scenarios
+- Audio integration from USB capture devices
 """
 import gi
 import argparse
@@ -20,24 +27,31 @@ gi.require_version('Gst', '1.0')
 gi.require_version('GstRtspServer', '1.0')
 from gi.repository import Gst, GstRtspServer, GLib, GObject
 
-# Constants
-DEFAULT_PORT = "1234"
-DEFAULT_ENDPOINT = "/hdmi"
+# Configuration constants
+DEFAULT_RTSP_PORT = "1234"
+DEFAULT_RTSP_ENDPOINT = "/hdmi"
 RTSP_LATENCY_MS = 200
-SUBPROCESS_TIMEOUT = 5
-AUDIO_SAMPLE_RATE = 48000
-AUDIO_BITRATE = 128000
-VIDEO_BITRATE = 3000
-VIDEO_KEYFRAME_INTERVAL = 30
+SUBPROCESS_TIMEOUT_SECONDS = 5
+AUDIO_SAMPLE_RATE_HZ = 48000
+AUDIO_BITRATE_BPS = 128000
+VIDEO_BITRATE_KBPS = 3000
+VIDEO_KEYFRAME_INTERVAL_FRAMES = 30
 
 Gst.init(None)
 
-# Global cleanup registry for robust cleanup in all termination scenarios
+# =============================================================================
+# Global Cleanup System
+# =============================================================================
+# Registry for cleanup functions to ensure proper resource cleanup in all
+# termination scenarios (normal exit, signals, exceptions, etc.)
+
 _cleanup_registry = []
+
 
 def register_cleanup(cleanup_func, *args, **kwargs):
     """Register a cleanup function to be called on exit."""
     _cleanup_registry.append((cleanup_func, args, kwargs))
+
 
 def cleanup_all():
     """Execute all registered cleanup functions."""
@@ -47,14 +61,23 @@ def cleanup_all():
         except Exception as e:
             print(f"⚠️  Cleanup error: {e}")
 
+
 # Register global cleanup handler
 atexit.register(cleanup_all)
 
+
+# =============================================================================
+# Utility Functions
+# =============================================================================
 
 def timestamp() -> str:
     """Return current timestamp in standard format."""
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+
+# =============================================================================
+# Device Detection and Management
+# =============================================================================
 
 class HDMIDeviceDetector:
     """Detects and validates HDMI capture devices and associated audio cards."""
@@ -75,7 +98,7 @@ class HDMIDeviceDetector:
                 ['v4l2-ctl', '-d', device, '--all'],
                 capture_output=True,
                 text=True,
-                timeout=SUBPROCESS_TIMEOUT
+                timeout=SUBPROCESS_TIMEOUT_SECONDS
             )
             info = result.stdout
 
@@ -85,53 +108,52 @@ class HDMIDeviceDetector:
             # Check for high resolution support (HDMI capture devices)
             return bool(re.search(r'1920.*1080|1280.*720', info))
 
-        except (subprocess.TimeoutExpired, subprocess.CalledProcessError,
-                FileNotFoundError):
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
             return False
 
-    def usb_tail_for_video(self, device: str) -> Optional[str]:
-        """Extract USB path for video device."""
-        node = os.path.basename(device)
-        sys_path = f"/sys/class/video4linux/{node}/device"
+    def _extract_usb_path_tail(self, device: str) -> Optional[str]:
+        """Extract USB path tail for video device."""
+        device_node = os.path.basename(device)
+        sys_device_path = f"/sys/class/video4linux/{device_node}/device"
 
-        if not os.path.exists(sys_path):
+        if not os.path.exists(sys_device_path):
             return None
 
         try:
-            full_path = os.path.realpath(sys_path)
-            match = re.findall(r'\d+-[\d.]+', full_path)
-            return match[-1] if match else None
+            real_path = os.path.realpath(sys_device_path)
+            usb_path_matches = re.findall(r'\d+-[\d.]+', real_path)
+            return usb_path_matches[-1] if usb_path_matches else None
         except Exception:
             return None
 
-    def alsa_card_for_usb_tail(self, usb_tail: str) -> Optional[str]:
-        """Find ALSA card matching USB tail."""
-        sound_path = Path('/sys/class/sound')
+    def _find_alsa_card_by_usb_tail(self, usb_tail: str) -> Optional[str]:
+        """Find ALSA card matching USB path tail."""
+        sound_class_path = Path('/sys/class/sound')
 
-        for card_path in sound_path.glob('card*'):
+        for card_path in sound_class_path.glob('card*'):
             if not card_path.is_dir():
                 continue
 
-            device_path = card_path / 'device'
-            if not device_path.exists():
+            card_device_path = card_path / 'device'
+            if not card_device_path.exists():
                 continue
 
             try:
-                full_path = os.path.realpath(device_path)
-                audio_usb_matches = re.findall(r'\d+-[\d.]+', full_path)
+                real_device_path = os.path.realpath(card_device_path)
+                audio_usb_matches = re.findall(r'\d+-[\d.]+', real_device_path)
                 if not audio_usb_matches:
                     continue
 
                 # Match must be exact on the USB device path
                 if audio_usb_matches[-1] == usb_tail:
-                    card_num = card_path.name.replace('card', '')
+                    card_number = card_path.name.replace('card', '')
 
                     # Verify this card has a capture device
-                    asound_path = Path(f"/proc/asound/card{card_num}")
-                    if any(asound_path.glob('pcm*c')):
-                        return card_num
+                    asound_card_path = Path(f"/proc/asound/card{card_number}")
+                    if any(asound_card_path.glob('pcm*c')):
+                        return card_number
 
-                    self.log(f"Warning: Found audio card {card_num} on same "
+                    self.log(f"Warning: Found audio card {card_number} on same "
                             f"USB device, but it has no capture devices")
                     return None
             except Exception:
@@ -179,7 +201,7 @@ class HDMIDeviceDetector:
                 ['v4l2-ctl', '--list-devices'],
                 capture_output=True,
                 text=True,
-                timeout=SUBPROCESS_TIMEOUT
+                timeout=SUBPROCESS_TIMEOUT_SECONDS
             )
 
             devices = []
@@ -200,8 +222,7 @@ class HDMIDeviceDetector:
                         devices.append(match.group(0))
 
             return devices
-        except (subprocess.TimeoutExpired, subprocess.CalledProcessError,
-                FileNotFoundError):
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
             return []
 
     def detect_video_device(self) -> Optional[str]:
@@ -215,16 +236,17 @@ class HDMIDeviceDetector:
         """Detect audio card for the video device."""
         if self.audio_force_card:
             self.log(f"Forcing ALSA card: {self.audio_force_card}")
-            return (self.audio_force_card if
-                    self.verify_audio_card(self.audio_force_card) else None)
+            return (self.audio_force_card 
+                    if self.verify_audio_card(self.audio_force_card) 
+                    else None)
 
-        usb_tail = self.usb_tail_for_video(video_device)
+        usb_tail = self._extract_usb_path_tail(video_device)
         if not usb_tail:
             self.log("Could not resolve USB path tail. Running video-only.")
             return None
 
         self.log(f"USB path for video device: {usb_tail}")
-        audio_card = self.alsa_card_for_usb_tail(usb_tail)
+        audio_card = self._find_alsa_card_by_usb_tail(usb_tail)
 
         if audio_card:
             self.log(f"Matched ALSA card by USB path: card {audio_card}")
@@ -238,6 +260,10 @@ class HDMIDeviceDetector:
                 f"Running video-only.")
         return None
 
+
+# =============================================================================
+# Local Display Pipeline Management
+# =============================================================================
 
 class LocalDisplayPipeline:
     """Manages local display pipeline for live preview.
@@ -256,8 +282,8 @@ class LocalDisplayPipeline:
         self.debug_mode = debug_mode
         self.share_video = share_video
         self.pipeline = None
-        self.shm_socket_path = "/tmp/hdmi-usb-video-shm"
-        self.intervideo_channel = "hdmi-usb-channel"
+        self.shared_memory_socket_path = "/tmp/hdmi-usb-video-shm"
+        self.intervideo_channel_name = "hdmi-usb-channel"
         self.server = server  # Reference to RTSPServer for shutdown callback
         
         # Window state management
@@ -543,7 +569,7 @@ class LocalDisplayPipeline:
                 'jpegdec ! videoconvert ! tee name=t '
                 't. ! queue ! videoscale ! ximagesink sync=false '
                 't. ! queue ! '
-                f'intervideosink channel={self.intervideo_channel}'
+                f'intervideosink channel={self.intervideo_channel_name}'
             )
         else:
             # Simple pipeline without sharing
@@ -566,26 +592,13 @@ class LocalDisplayPipeline:
         else:
             return video_pipeline
 
-    def reset_video_device(self):
-        """Reset the video device to ensure it's available."""
-        try:
-            # Try to reset the device by setting it to a known state
-            subprocess.run(
-                ['v4l2-ctl', '-d', self.video_device, '--set-fmt-video=width=1920,height=1080,pixelformat=MJPG'],
-                capture_output=True,
-                timeout=2
-            )
-            self.log(f"Video device {self.video_device} reset")
-        except Exception as e:
-            self.log(f"Could not reset video device: {e}")
 
-    def check_audio_device_availability(self) -> bool:
+    def _is_audio_device_available(self) -> bool:
         """Check if the audio device is available."""
         if not self.audio_card:
             return False
         
         try:
-            # Check if the audio device exists and is accessible
             result = subprocess.run(
                 ['arecord', '-l'],
                 capture_output=True,
@@ -599,7 +612,7 @@ class LocalDisplayPipeline:
     def start(self) -> bool:
         """Start the local display pipeline."""
         # Check audio device availability
-        if self.audio_card and not self.check_audio_device_availability():
+        if self.audio_card and not self._is_audio_device_available():
             self.log(f"Audio card {self.audio_card} not available, running video-only")
             self.audio_card = None
         
@@ -732,6 +745,10 @@ class LocalDisplayPipeline:
             print(f"⚠️  Error during local display cleanup: {e}")
 
 
+# =============================================================================
+# RTSP Media Factory and Server
+# =============================================================================
+
 class RTSPMediaFactory(GstRtspServer.RTSPMediaFactory):
     """Factory for creating RTSP media pipelines."""
 
@@ -755,21 +772,21 @@ class RTSPMediaFactory(GstRtspServer.RTSPMediaFactory):
                 ['v4l2-ctl', '-d', self.video_device, '--list-formats-ext'],
                 capture_output=True,
                 text=True,
-                timeout=SUBPROCESS_TIMEOUT
+                timeout=SUBPROCESS_TIMEOUT_SECONDS
             )
             return 'MJPG' in result.stdout or 'MJPEG' in result.stdout
         except Exception:
             return True
 
-    def _build_audio_pipeline(self, device_spec: str, pay_name: str) -> str:
+    def _build_audio_pipeline(self, device_spec: str, payload_name: str) -> str:
         """Build audio pipeline string."""
         return (
             f'alsasrc device={device_spec} ! '
             f'queue max-size-time=1000000000 ! '
             f'audioconvert ! audioresample ! '
-            f'audio/x-raw,format=S16LE,rate={AUDIO_SAMPLE_RATE},channels=2 ! '
-            f'voaacenc bitrate={AUDIO_BITRATE} ! '
-            f'rtpmp4gpay pt=97 name={pay_name}'
+            f'audio/x-raw,format=S16LE,rate={AUDIO_SAMPLE_RATE_HZ},channels=2 ! '
+            f'voaacenc bitrate={AUDIO_BITRATE_BPS} ! '
+            f'rtpmp4gpay pt=97 name={payload_name}'
         )
 
     def _build_video_pipeline(self, use_mjpeg: bool) -> str:
@@ -796,8 +813,8 @@ class RTSPMediaFactory(GstRtspServer.RTSPMediaFactory):
 
         encoder = (
             f'videoconvert ! video/x-raw,format=I420 ! '
-            f'x264enc tune=zerolatency key-int-max={VIDEO_KEYFRAME_INTERVAL} '
-            f'bitrate={VIDEO_BITRATE} speed-preset=veryfast '
+            f'x264enc tune=zerolatency key-int-max={VIDEO_KEYFRAME_INTERVAL_FRAMES} '
+            f'bitrate={VIDEO_BITRATE_KBPS} speed-preset=veryfast '
             f'byte-stream=true threads=1 ! '
             f'h264parse config-interval=1 ! '
             f'video/x-h264,stream-format=avc,alignment=au ! '
@@ -827,8 +844,9 @@ class RTSPMediaFactory(GstRtspServer.RTSPMediaFactory):
             video_pipeline = self._build_video_pipeline(mjpeg_supported)
 
             if self.audio_card:
+                # Use plughw for better compatibility when device might be busy
                 audio_pipeline = self._build_audio_pipeline(
-                    f'dsnoop:{self.audio_card},0', 'pay1'
+                    f'plughw:{self.audio_card},0', 'pay1'
                 )
                 pipeline_str = f'{video_pipeline} {audio_pipeline}'
             else:
@@ -927,10 +945,22 @@ class RTSPMediaFactory(GstRtspServer.RTSPMediaFactory):
 class RTSPServer(GstRtspServer.RTSPServer):
     """RTSP Server for HDMI capture streaming."""
 
+    def _test_audio_device_availability(self, audio_card):
+        """Test if audio device is available for RTSP streaming."""
+        try:
+            # Test with a short recording to see if device is available
+            result = subprocess.run(
+                ['arecord', '-D', f'plughw:{audio_card},0', '-f', 'cd', '-d', '1', '/dev/null'],
+                capture_output=True, text=True, timeout=3
+            )
+            return result.returncode == 0
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
+            return False
+
     def __init__(self, audio_only=False, debug_mode=False, headless=False):
         super().__init__()
-        self.port = DEFAULT_PORT
-        self.endpoint = DEFAULT_ENDPOINT
+        self.port = DEFAULT_RTSP_PORT
+        self.endpoint = DEFAULT_RTSP_ENDPOINT
         self.debug_mode = debug_mode
         self.headless = headless
         self.main_loop = None
@@ -957,6 +987,12 @@ class RTSPServer(GstRtspServer.RTSPServer):
             print(f"[{timestamp()}] ✅ Found video device: {video_device}")
             if audio_card:
                 print(f"[{timestamp()}] ✅ Found audio card: {audio_card}")
+                # Test if audio device is available for RTSP streaming
+                if not self._test_audio_device_availability(audio_card):
+                    print(f"[{timestamp()}] ⚠️  Audio device busy - using video-only mode")
+                    audio_card = None
+                else:
+                    print(f"[{timestamp()}] ✅ Audio device available for streaming")
             else:
                 print(f"[{timestamp()}] ⚠️  No audio device found - video only")
         elif audio_only:
@@ -966,17 +1002,16 @@ class RTSPServer(GstRtspServer.RTSPServer):
 
         # Determine if we need to share video source
         use_local_display = not self.headless and video_device and not audio_only
-        intervideo_channel = "hdmi-usb-channel"
+        intervideo_channel_name = "hdmi-usb-channel"
 
         # Start local display first if not in headless mode
         if use_local_display:
             print(f"[{timestamp()}] 🖥️  Starting local display...")
-            # Temporarily disable audio to ensure reliable video operation
             self.local_display = LocalDisplayPipeline(
                 video_device=video_device,
-                audio_card=None,  # Disable audio for now
+                audio_card=audio_card,
                 debug_mode=debug_mode,
-                share_video=False,  # Temporarily disable video sharing
+                share_video=True,  # Enable video sharing for RTSP
                 server=self  # Pass server reference for shutdown callback
             )
             if not self.local_display.start():
@@ -993,7 +1028,7 @@ class RTSPServer(GstRtspServer.RTSPServer):
             debug_mode=debug_mode,
             server=self,
             use_intervideo=use_local_display,  # Use intervideo if local display is running
-            intervideo_channel=intervideo_channel
+            intervideo_channel=intervideo_channel_name
         )
         self.factory.set_eos_shutdown(False)
         self.factory.set_stop_on_disconnect(False)
@@ -1063,6 +1098,10 @@ class RTSPServer(GstRtspServer.RTSPServer):
         except Exception as e:
             print(f"⚠️  Error during server shutdown: {e}")
 
+
+# =============================================================================
+# Main Application Entry Point
+# =============================================================================
 
 def main():
     """Main entry point for the RTSP server."""

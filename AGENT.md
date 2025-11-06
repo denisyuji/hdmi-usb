@@ -78,6 +78,7 @@ When making commits to this project, please generate commit messages that adhere
 
 ## Usage Guidelines
 
+- **Always use a timeout**: When testing or troubleshooting, always run the script with a timeout to avoid it runs forever.
 - **Always use --debug flag**: When testing or troubleshooting, always run the script with the `--debug` flag to see detailed logs and GStreamer output.
 - **Default mode is silent**: Without `--debug`, the script runs silently with no output unless there are errors.
 - **Window state management**: Use `--reset-window` to clear saved window position/size if needed.

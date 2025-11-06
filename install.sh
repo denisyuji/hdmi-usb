@@ -3,7 +3,7 @@
 echo "[INFO] Installing hdmi-usb..."
 rm -rf /usr/local/bin/hdmi-usb/local/bin
 mkdir -p ~/.local/bin
-cp ./hdmi-usb.sh ~/.local/bin/hdmi-usb
+cp ./hdmi-usb.py ~/.local/bin/hdmi-usb
 sudo chmod +x ~/.local/bin/hdmi-usb
 
 # === Ensure ~/.local/bin is in PATH ===

@@ -6,20 +6,15 @@ This project provides automated HDMI capture device detection and preview functi
 
 ## Key Components
 
-### hdmi-usb.sh / hdmi-usb.py
-The tool is available in both Bash and Python versions with identical features:
+### hdmi-usb.py
+Python implementation with the following features:
 
-**Bash Version (hdmi-usb.sh)**
-- Original implementation in Bash
-- Uses subprocess calls to system utilities
+- **Implementation**: Object-oriented Python 3 implementation
+- **Dependencies**: Uses only Python standard library (no external PyPI dependencies)
+- **Code Organization**: HDMICapture class with clean separation of concerns
+- **Threading**: Background window monitoring using threading
 
-**Python Version (hdmi-usb.py)**
-- Object-oriented implementation in Python 3
-- Uses only Python standard library (no external PyPI dependencies)
-- Better code organization with HDMICapture class
-- Threading for background window monitoring
-
-**Common Features:**
+**Features:**
 - **Device Detection**: Uses `v4l2-ctl` to identify MacroSilicon USB Video devices
 - **Resolution Filtering**: Ensures device supports high-resolution capture (1920x1080/1280x720)
 - **GStreamer Pipeline**: `v4l2src → decodebin → videoconvert → videoscale → ximagesink`
@@ -33,7 +28,7 @@ The tool is available in both Bash and Python versions with identical features:
 - **Window State Persistence**: Monitors and saves window position/size changes in real-time (every 2 seconds)
 
 ### snapshot.sh
-- **Device Detection**: Reuses same device detection logic as hdmi-usb.sh
+- **Device Detection**: Reuses same device detection logic as hdmi-usb.py
 - **Single Frame Capture**: Uses `num-buffers=1` to capture exactly one frame
 - **GStreamer Pipeline**: `v4l2src → decodebin → videoconvert → pngenc → filesink`
 - **Timestamp Naming**: Saves files as `snapshot_YYYYMMDD_HHMMSS.png`

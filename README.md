@@ -21,27 +21,6 @@ Scripts to detect and preview MacroSilicon USB HDMI capture devices using GStrea
 
 ### Live Preview
 
-The tool is available in both Bash and Python versions with identical features:
-
-**Bash Version (hdmi-usb.sh)**
-```bash
-# Start HDMI capture preview (silent mode)
-./hdmi-usb.sh
-
-# Start with debug output
-./hdmi-usb.sh --debug
-
-# Show help information
-./hdmi-usb.sh --help
-
-# Reset window position to default
-./hdmi-usb.sh --reset-window
-
-# Install system-wide
-./install.sh
-```
-
-**Python Version (hdmi-usb.py)**
 ```bash
 # Start HDMI capture preview (silent mode)
 ./hdmi-usb.py
@@ -54,7 +33,12 @@ The tool is available in both Bash and Python versions with identical features:
 
 # Reset window position to default
 ./hdmi-usb.py --reset-window
+
+# Install system-wide
+./install.sh
 ```
+
+After installation, use `hdmi-usb` command from anywhere.
 
 #### Command Line Options
 
@@ -235,17 +219,8 @@ sudo apt install gstreamer1.0-vaapi gstreamer1.0-plugins-base-apps
 sudo apt install ffmpeg
 ```
 
-**Note:** The Python version (`hdmi-usb.py`) uses only Python standard library modules and requires no PyPI packages. See `requirements.txt` for details.
+**Note:** The `hdmi-usb.py` script uses only Python standard library modules and requires no PyPI packages. See `requirements.txt` for details.
 
-## Installation
-
-```bash
-git clone <repository>
-cd capture
-./install.sh
-```
-
-After installation, use `hdmi-usb` command from anywhere.
 
 ## Window State
 

@@ -1,10 +1,9 @@
 #!/bin/bash
 
 echo "[INFO] Installing hdmi-usb..."
-rm -rf /usr/local/bin/hdmi-usb/local/bin
 mkdir -p ~/.local/bin
 cp ./hdmi-usb.py ~/.local/bin/hdmi-usb
-sudo chmod +x ~/.local/bin/hdmi-usb
+chmod +x ~/.local/bin/hdmi-usb
 
 # === Ensure ~/.local/bin is in PATH ===
 if ! echo ":$PATH:" | grep -q ":$HOME/.local/bin:"; then

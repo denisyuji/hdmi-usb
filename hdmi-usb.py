@@ -359,21 +359,38 @@ class HDMICapture:
         time.sleep(3)  # Wait for window to appear
         
         last_geometry = ""
-        window_id = self.get_window_id(timeout=2.0)
+        window_id = self.get_window_id(timeout=5.0)
         
         if not window_id:
+            self.log("Window not found for monitoring")
             return
         
         self.log(f"Monitoring window {window_id} for position changes...")
         
         # Monitor window position every 2 seconds
-        while self.gst_pid and self.is_process_running(self.gst_pid):
+        # Check both PID and window existence for robustness
+        while True:
+            # Check if process is still running
+            pid_running = self.gst_pid and self.is_process_running(self.gst_pid)
+            
+            # Check if window still exists
+            try:
+                window_exists = self.get_window_geometry(window_id) is not None
+            except Exception:
+                window_exists = False
+            
+            # Exit if both process and window are gone
+            if not pid_running and not window_exists:
+                self.log("Process and window no longer exist, stopping monitoring")
+                break
+            
+            # Continue monitoring if either exists
             try:
                 current_geometry = self.get_window_geometry(window_id)
                 
                 if current_geometry and current_geometry != last_geometry:
                     self.window_state_file.write_text(current_geometry)
-                    self.log(f"Window moved, state updated: {current_geometry}")
+                    self.log(f"Window moved/resized, state updated: {current_geometry}")
                     last_geometry = current_geometry
             except Exception:
                 pass
@@ -390,9 +407,140 @@ class HDMICapture:
         except OSError:
             return False
     
+    def kill_existing_instances(self):
+        """Kill other instances of this script and their GStreamer processes."""
+        current_pid = os.getpid()
+        killed_count = 0
+        
+        try:
+            # Find all python processes running hdmi-usb.py (excluding current process)
+            result = subprocess.run(
+                ['pgrep', '-f', r'python.*hdmi-usb\.py'],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            
+            if result.returncode == 0:
+                pids = [int(pid.strip()) for pid in result.stdout.strip().split('\n') if pid.strip()]
+                for pid in pids:
+                    if pid != current_pid:
+                        try:
+                            self.log(f"Killing existing instance (PID: {pid})")
+                            os.kill(pid, signal.SIGTERM)
+                            killed_count += 1
+                            # Wait a bit for graceful shutdown
+                            time.sleep(0.5)
+                            # Force kill if still running
+                            try:
+                                os.kill(pid, 0)
+                                os.kill(pid, signal.SIGKILL)
+                            except OSError:
+                                pass
+                        except (OSError, ProcessLookupError):
+                            pass
+            
+            # Also kill any orphaned gst-launch processes for this device
+            time.sleep(0.5)  # Give processes time to exit
+            result = subprocess.run(
+                ['pgrep', '-f', 'gst-launch-1.0.*v4l2src'],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            
+            if result.returncode == 0:
+                gst_pids = [int(pid.strip()) for pid in result.stdout.strip().split('\n') if pid.strip()]
+                for pid in gst_pids:
+                    try:
+                        self.log(f"Killing orphaned GStreamer process (PID: {pid})")
+                        os.kill(pid, signal.SIGTERM)
+                        time.sleep(0.2)
+                        try:
+                            os.kill(pid, 0)
+                            os.kill(pid, signal.SIGKILL)
+                        except OSError:
+                            pass
+                    except (OSError, ProcessLookupError):
+                        pass
+            
+            if killed_count > 0:
+                self.log(f"Killed {killed_count} existing instance(s)")
+                time.sleep(1)  # Give processes time to fully exit
+                
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
+            # pgrep not available or failed, try alternative method
+            pass
+    
+    def find_gst_launch_pid(self, parent_pid: Optional[int] = None, timeout: float = 3.0) -> Optional[int]:
+        """Find the actual gst-launch-1.0 process PID.
+        
+        When using shell=True, the Popen PID is the shell, not gst-launch.
+        This function finds the actual gst-launch-1.0 process.
+        """
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            try:
+                # Find gst-launch-1.0 process that matches our video device
+                # Use a more specific pattern to avoid matching other instances
+                result = subprocess.run(
+                    ['pgrep', '-f', 'gst-launch-1.0.*v4l2src'],
+                    capture_output=True,
+                    text=True,
+                    timeout=1
+                )
+                
+                if result.returncode == 0:
+                    pids = [int(pid.strip()) for pid in result.stdout.strip().split('\n') if pid.strip()]
+                    
+                    if pids:
+                        # If we have a parent PID, try to find the child
+                        if parent_pid:
+                            try:
+                                # Get process tree to find children
+                                result = subprocess.run(
+                                    ['ps', '--ppid', str(parent_pid), '-o', 'pid=', '--no-headers'],
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=1
+                                )
+                                child_pids = [int(pid.strip()) for pid in result.stdout.strip().split('\n') if pid.strip()]
+                                
+                                # Check if any gst-launch PID is a child
+                                for gst_pid in pids:
+                                    if gst_pid in child_pids:
+                                        return gst_pid
+                                    # Also check grandchildren by checking if gst_pid's parent is a child
+                                    try:
+                                        parent_result = subprocess.run(
+                                            ['ps', '-p', str(gst_pid), '-o', 'ppid=', '--no-headers'],
+                                            capture_output=True,
+                                            text=True,
+                                            timeout=1
+                                        )
+                                        gst_parent = int(parent_result.stdout.strip())
+                                        if gst_parent in child_pids:
+                                            return gst_pid
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+                        
+                        # Return the first (or only) PID found
+                        return pids[0]
+            except Exception:
+                pass
+            
+            time.sleep(0.2)
+        
+        return None
+    
     def launch_gstreamer(self, video_dev: str, audio_card: Optional[str] = None):
         """Launch GStreamer pipeline."""
         # Build video pipeline
+        # Use decodebin for format auto-detection (works with MJPG and other formats)
+        # Queue helps with buffering and format negotiation
         gst_video = f"v4l2src device={video_dev} ! queue ! decodebin ! videoconvert ! videoscale ! ximagesink sync=false"
         
         if audio_card:
@@ -415,7 +563,8 @@ class HDMICapture:
             if not self.debug_mode:
                 print(f"[INFO] Using audio from USB HDMI capture device (card {audio_card}: {audio_card_name})")
             
-            cmd = ['gst-launch-1.0'] + gst_video.split() + gst_audio.split()
+            # Use shell=True to match bash script behavior (allows proper pipeline expansion)
+            cmd = f'gst-launch-1.0 {gst_video} {gst_audio}'
         else:
             self.log(f"Launching video-only preview in background (video={video_dev})")
             self.log(f"GStreamer command: gst-launch-1.0 {gst_video}")
@@ -424,25 +573,38 @@ class HDMICapture:
             if not self.debug_mode:
                 print("[INFO] No audio device found for USB HDMI capture - running video only")
             
-            cmd = ['gst-launch-1.0'] + gst_video.split()
+            # Use shell=True to match bash script behavior (allows proper pipeline expansion)
+            cmd = f'gst-launch-1.0 {gst_video}'
         
         # Launch GStreamer
         try:
             if self.debug_mode:
-                process = subprocess.Popen(cmd)
+                process = subprocess.Popen(cmd, shell=True)
             else:
                 process = subprocess.Popen(
                     cmd,
+                    shell=True,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL
                 )
             
-            self.gst_pid = process.pid
-            self.log(f"GStreamer started with PID: {self.gst_pid}")
+            # When using shell=True, process.pid is the shell PID, not gst-launch
+            # Find the actual gst-launch-1.0 process PID
+            time.sleep(0.5)  # Give gst-launch time to start
+            actual_gst_pid = self.find_gst_launch_pid(parent_pid=process.pid)
+            
+            if actual_gst_pid:
+                self.gst_pid = actual_gst_pid
+                self.log(f"GStreamer started with PID: {self.gst_pid} (found actual gst-launch process)")
+            else:
+                # Fallback to shell PID if we can't find gst-launch
+                self.gst_pid = process.pid
+                self.log(f"GStreamer started with PID: {self.gst_pid} (using shell PID, monitoring may be limited)")
+            
             self.log(f"To stop the preview, run: kill {self.gst_pid}")
             
             # Wait a moment to ensure GStreamer starts properly
-            time.sleep(1)
+            time.sleep(0.5)
             
             # Check if GStreamer is still running
             if self.is_process_running(self.gst_pid):
@@ -455,9 +617,11 @@ class HDMICapture:
                     self.apply_window_state()
                 
                 # Start monitoring in background using threading
+                # Always start monitoring thread, even if PID detection failed
                 import threading
                 monitor_thread = threading.Thread(target=self.monitor_window_state, daemon=True)
                 monitor_thread.start()
+                self.log("Window monitoring thread started")
                 
                 return True
             else:
@@ -469,6 +633,9 @@ class HDMICapture:
     
     def run(self) -> int:
         """Main run method."""
+        # Kill any existing instances before starting
+        self.kill_existing_instances()
+        
         # Detect video device
         video_dev = self.detect_video_device()
         
@@ -493,7 +660,6 @@ class HDMICapture:
                     time.sleep(1)
             except KeyboardInterrupt:
                 self.log("Interrupted by user")
-            
             return 0
         else:
             return 1
@@ -513,7 +679,7 @@ DESCRIPTION:
 EXAMPLES:
     %(prog)s                   # Launch with default settings (no debug output)
     %(prog)s --debug           # Launch with debug output enabled
-    %(prog)s --reset-window    # Reset window state and exit
+    %(prog)s --reset-window     # Reset window state and exit
         '''
     )
     
@@ -543,6 +709,8 @@ EXAMPLES:
     
     # Run the capture
     capture = HDMICapture(debug_mode=args.debug)
+    
+    # Continue with the full run
     return capture.run()
 
 

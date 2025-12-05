@@ -6,13 +6,14 @@ Scripts to detect and preview MacroSilicon USB HDMI capture devices using GStrea
 
 - **Auto-detection** of MacroSilicon USB Video devices
 - **Background execution** - terminal remains free for other commands
-- **Window state persistence** - remembers window position and size
+- **Window state persistence** - remembers window position and size, automatically saves on resize
+- **Instance management** - automatically kills previous instances on startup
 - **Silent operation** - no output by default (use `--debug` for logs)
 - **Audio support** - automatically detects and uses audio from capture device
 - **Snapshot capture** - take single frame screenshots with timestamp
 - **RTSP streaming** - stream live video/audio over network
 - **Local display window** - live preview with automatic video sharing
-- **Robust cleanup** - comprehensive resource management and cleanup
+- **Robust cleanup** - comprehensive resource management and cleanup of processes
 - **Debug mode** - verbose logging for troubleshooting
 - **Help system** - built-in usage information
 

@@ -24,10 +24,13 @@ The tool is available in both Bash and Python versions with identical features:
 - **Resolution Filtering**: Ensures device supports high-resolution capture (1920x1080/1280x720)
 - **GStreamer Pipeline**: `v4l2src → decodebin → videoconvert → videoscale → ximagesink`
 - **Window Management**: Automatic position/size saving and restoration using `wmctrl`
+- **Instance Cleanup**: Automatically kills previous instances and orphaned GStreamer processes on startup
 - **Background Execution**: Runs GStreamer silently without blocking terminal
+- **Process Monitoring**: Improved PID detection finds actual gst-launch process (not shell PID)
+- **Window Monitoring**: Robust monitoring checks both process PID and window existence
 - **Debug Mode**: `--debug` flag enables verbose logging for troubleshooting
 - **Help System**: `--help` flag provides usage information
-- **Window State Persistence**: Monitors and saves window position/size changes in real-time
+- **Window State Persistence**: Monitors and saves window position/size changes in real-time (every 2 seconds)
 
 ### snapshot.sh
 - **Device Detection**: Reuses same device detection logic as hdmi-usb.sh
@@ -48,8 +51,11 @@ The tool is available in both Bash and Python versions with identical features:
 
 - **Device Identification**: Looks for "USB Video: USB Video" devices with high-resolution support
 - **Window State**: Saved to `~/.hdmi-usb-window-state` in format `WIDTHxHEIGHT+X+Y`
+- **Window Monitoring**: Monitors window geometry every 2 seconds, saves on any change
+- **Instance Management**: Uses `pgrep` to find and kill existing Python/GStreamer processes
+- **PID Detection**: When using `shell=True`, finds actual gst-launch process via process tree traversal
 - **Audio Detection**: Attempts to match ALSA cards by USB device path
-- **Error Handling**: Graceful fallbacks for missing dependencies
+- **Error Handling**: Graceful fallbacks for missing dependencies, robust monitoring continues even if PID detection fails
 
 ## Dependencies
 

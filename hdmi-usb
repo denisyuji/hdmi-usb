@@ -1,0 +1,23 @@
+#!/bin/bash
+# Start hdmi-usb.py as a background process and exit
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Check if --debug is in the arguments
+DEBUG_MODE=false
+for arg in "$@"; do
+    if [[ "$arg" == "--debug" ]] || [[ "$arg" == "-d" ]]; then
+        DEBUG_MODE=true
+        break
+    fi
+done
+
+# Run the Python script
+if [ "$DEBUG_MODE" = true ]; then
+    # Debug mode: show all output
+    "${SCRIPT_DIR}/hdmi-usb.py" "$@" &
+else
+    # Silent mode: redirect output to /dev/null
+    "${SCRIPT_DIR}/hdmi-usb.py" "$@" >/dev/null 2>&1 &
+fi
+

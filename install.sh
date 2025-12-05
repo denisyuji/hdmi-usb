@@ -2,7 +2,8 @@
 
 echo "[INFO] Installing hdmi-usb..."
 mkdir -p ~/.local/bin
-cp ./hdmi-usb.py ~/.local/bin/hdmi-usb
+cp ./hdmi-usb.py ~/.local/bin/hdmi-usb.py
+cp ./hdmi-usb ~/.local/bin/hdmi-usb
 chmod +x ~/.local/bin/hdmi-usb
 
 # === Ensure ~/.local/bin is in PATH ===

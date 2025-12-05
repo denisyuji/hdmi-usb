@@ -39,6 +39,22 @@ class HDMICapture:
     
     def is_video_hdmi_usb(self, dev: str) -> bool:
         """Check if device is a video HDMI capture device."""
+        # First check if device file exists and is accessible
+        if not os.path.exists(dev):
+            self.log(f"Device {dev} does not exist")
+            return False
+        
+        # Check if device is readable (not locked by another process)
+        try:
+            with open(dev, 'rb') as f:
+                pass
+        except PermissionError:
+            self.log(f"Device {dev} is not accessible (may be in use by another process)")
+            return False
+        except Exception as e:
+            self.log(f"Cannot access device {dev}: {e}")
+            return False
+        
         try:
             result = subprocess.run(
                 ['v4l2-ctl', '-d', dev, '--all'],
@@ -46,21 +62,75 @@ class HDMICapture:
                 text=True,
                 timeout=5
             )
+            
+            # Log stderr if there are errors
+            if result.stderr:
+                self.log(f"v4l2-ctl stderr for {dev}: {result.stderr}")
+            
+            # If command failed, log the error
+            if result.returncode != 0:
+                self.log(f"v4l2-ctl failed for {dev} (return code: {result.returncode})")
+                if result.stderr:
+                    self.log(f"Error: {result.stderr}")
+                return False
+            
             info = result.stdout
             
             if not info:
+                self.log(f"No output from v4l2-ctl for {dev}")
                 return False
             
             # Check for Video Capture capability
             if 'Video Capture' not in info:
+                self.log(f"Device {dev} does not have 'Video Capture' capability")
+                # Log a sample of the output for debugging
+                if self.debug_mode:
+                    lines = info.splitlines()[:10]
+                    self.log(f"Sample output from {dev}: {lines}")
                 return False
             
             # Check for high resolution support (HDMI capture devices)
-            if not re.search(r'1920.*1080|1280.*720', info):
-                return False
+            # Try multiple patterns to catch different formats
+            resolution_patterns = [
+                r'1920.*1080',
+                r'1280.*720',
+                r'1920x1080',
+                r'1280x720',
+                r'Width/Height.*1920.*1080',
+                r'Width/Height.*1280.*720'
+            ]
+            
+            has_resolution = any(re.search(pattern, info, re.IGNORECASE) for pattern in resolution_patterns)
+            
+            if not has_resolution:
+                self.log(f"Device {dev} does not report expected HDMI resolutions")
+                # In debug mode, show what resolutions are available
+                if self.debug_mode:
+                    # Try to extract available formats
+                    format_lines = [line for line in info.splitlines() if 'Size:' in line or 'Width/Height' in line or 'fmt' in line.lower()]
+                    if format_lines:
+                        self.log(f"Available formats/resolutions for {dev}: {format_lines[:5]}")
+                    else:
+                        self.log(f"Could not find format information in output for {dev}")
+                # Still allow the device if it has Video Capture - resolution might be negotiated at runtime
+                # But log a warning
+                self.log(f"Warning: Device {dev} has Video Capture but no expected HDMI resolutions found - will try anyway")
+                return True  # Allow it - GStreamer can negotiate formats
             
             return True
-        except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
+        except subprocess.TimeoutExpired:
+            self.log(f"Timeout querying device {dev}")
+            return False
+        except subprocess.CalledProcessError as e:
+            self.log(f"Error querying device {dev}: {e}")
+            if e.stderr:
+                self.log(f"Error details: {e.stderr}")
+            return False
+        except FileNotFoundError:
+            self.err("v4l2-ctl not found. Please install v4l-utils.")
+            return False
+        except Exception as e:
+            self.log(f"Unexpected error checking device {dev}: {e}")
             return False
     
     def usb_tail_for_video(self, dev: str) -> Optional[str]:
@@ -162,12 +232,19 @@ class HDMICapture:
                 timeout=5
             )
             
+            if result.returncode != 0:
+                self.log(f"v4l2-ctl --list-devices failed (return code: {result.returncode})")
+                if result.stderr:
+                    self.log(f"Error: {result.stderr}")
+                return []
+            
             devices = []
             in_block = False
             
             for line in result.stdout.splitlines():
                 if 'USB Video: USB Video' in line:
                     in_block = True
+                    self.log(f"Found USB Video device block: {line.strip()}")
                     continue
                 
                 if in_block:
@@ -177,19 +254,49 @@ class HDMICapture:
                     
                     match = re.search(r'/dev/video\d+', line)
                     if match:
-                        devices.append(match.group(0))
+                        device = match.group(0)
+                        devices.append(device)
+                        self.log(f"Found potential device: {device}")
+            
+            if not devices:
+                self.log("No USB Video devices found in v4l2-ctl output")
+                if self.debug_mode:
+                    self.log(f"Full v4l2-ctl output:\n{result.stdout}")
             
             return devices
-        except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
+        except subprocess.TimeoutExpired:
+            self.log("Timeout running v4l2-ctl --list-devices")
+            return []
+        except subprocess.CalledProcessError as e:
+            self.log(f"Error running v4l2-ctl --list-devices: {e}")
+            if e.stderr:
+                self.log(f"Error details: {e.stderr}")
+            return []
+        except FileNotFoundError:
+            self.err("v4l2-ctl not found. Please install v4l-utils.")
             return []
     
     def detect_video_device(self) -> Optional[str]:
         """Detect video HDMI capture device."""
-        for node in self.pick_nodes_by_name():
+        devices = self.pick_nodes_by_name()
+        
+        if not devices:
+            self.log("No USB Video devices found matching the expected pattern")
+            return None
+        
+        self.log(f"Found {len(devices)} potential device(s), checking capabilities...")
+        
+        for node in devices:
             if not node:
                 continue
+            self.log(f"Checking device {node}...")
             if self.is_video_hdmi_usb(node):
+                self.log(f"Device {node} passed all checks")
                 return node
+            else:
+                self.log(f"Device {node} did not pass capability checks")
+        
+        self.log("No devices passed the capability checks")
         return None
     
     def get_video_info(self, video_dev: str):
@@ -407,6 +514,47 @@ class HDMICapture:
         except OSError:
             return False
     
+    def cleanup_gstreamer(self):
+        """Clean up GStreamer process and related processes."""
+        # Kill the tracked GStreamer process
+        if self.gst_pid and self.is_process_running(self.gst_pid):
+            try:
+                self.log(f"Cleaning up GStreamer process (PID: {self.gst_pid})")
+                os.kill(self.gst_pid, signal.SIGTERM)
+                time.sleep(0.5)
+                # Force kill if still running
+                if self.is_process_running(self.gst_pid):
+                    os.kill(self.gst_pid, signal.SIGKILL)
+                    time.sleep(0.2)
+            except (OSError, ProcessLookupError):
+                pass
+            finally:
+                self.gst_pid = None
+        
+        # Also kill any orphaned gst-launch processes that might be using v4l2src
+        # This handles cases where PID tracking failed
+        try:
+            result = subprocess.run(
+                ['pgrep', '-f', 'gst-launch-1.0.*v4l2src'],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            
+            if result.returncode == 0:
+                gst_pids = [int(pid.strip()) for pid in result.stdout.strip().split('\n') if pid.strip()]
+                for pid in gst_pids:
+                    try:
+                        self.log(f"Cleaning up orphaned GStreamer process (PID: {pid})")
+                        os.kill(pid, signal.SIGTERM)
+                        time.sleep(0.2)
+                        if self.is_process_running(pid):
+                            os.kill(pid, signal.SIGKILL)
+                    except (OSError, ProcessLookupError):
+                        pass
+        except Exception:
+            pass
+    
     def kill_existing_instances(self):
         """Kill other instances of this script and their GStreamer processes."""
         current_pid = os.getpid()
@@ -536,12 +684,74 @@ class HDMICapture:
         
         return None
     
+    def check_device_streaming(self, video_dev: str) -> bool:
+        """Check if device can start streaming (detect bad state)."""
+        try:
+            # Try a simple streaming test
+            result = subprocess.run(
+                ['v4l2-ctl', '-d', video_dev, '--stream-mmap', '--stream-count=1', '--stream-to=/dev/null'],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            # If STREAMON fails, we'll get an error
+            if 'STREAMON' in result.stderr and 'error' in result.stderr.lower():
+                return False
+            return True
+        except Exception:
+            return False
+    
+    def reset_device_state(self, video_dev: str) -> bool:
+        """Reset device state by closing any open streams."""
+        try:
+            # Try to query the device - this will fail if device is truly broken
+            result = subprocess.run(
+                ['v4l2-ctl', '-d', video_dev, '--all'],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            if result.returncode != 0:
+                self.log(f"Warning: Cannot query device {video_dev}, may be in bad state")
+                return False
+            
+            # Check if device can stream
+            if not self.check_device_streaming(video_dev):
+                self.err(f"Device {video_dev} is in a bad state (STREAMON fails)")
+                self.err("This usually happens when a previous process didn't close the device properly.")
+                self.err("Try one of these solutions:")
+                self.err("  1. Unplug and replug the USB device")
+                self.err("  2. Reset the USB device: sudo usb_modeswitch -v 0x534d -p 0x2109 -R")
+                self.err("  3. Reload the driver: sudo modprobe -r uvcvideo && sudo modprobe uvcvideo")
+                return False
+            
+            # Try to set format explicitly to reset device state
+            subprocess.run(
+                ['v4l2-ctl', '-d', video_dev, '--set-fmt-video=pixelformat=MJPG,width=640,height=480'],
+                capture_output=True,
+                timeout=2
+            )
+            
+            # Small delay to let device settle
+            time.sleep(0.2)
+            return True
+        except Exception as e:
+            self.log(f"Error resetting device state: {e}")
+            return False
+    
     def launch_gstreamer(self, video_dev: str, audio_card: Optional[str] = None):
         """Launch GStreamer pipeline."""
+        # Reset device state before starting
+        if not self.reset_device_state(video_dev):
+            self.err(f"Cannot use device {video_dev} - it is in a bad state")
+            return False
+        
         # Build video pipeline
-        # Use decodebin for format auto-detection (works with MJPG and other formats)
-        # Queue helps with buffering and format negotiation
-        gst_video = f"v4l2src device={video_dev} ! queue ! decodebin ! videoconvert ! videoscale ! ximagesink sync=false"
+        # Try explicit MJPG format first, fallback to auto-negotiation
+        # Use jpegdec for MJPG decoding, videoconvert for format conversion
+        # Queue helps with buffering
+        # Try with explicit caps first - if this fails, we can fall back to decodebin
+        gst_video = f"v4l2src device={video_dev} ! image/jpeg ! jpegdec ! videoconvert ! videoscale ! ximagesink sync=false"
         
         if audio_card:
             # Get audio card name
@@ -633,35 +843,58 @@ class HDMICapture:
     
     def run(self) -> int:
         """Main run method."""
-        # Kill any existing instances before starting
-        self.kill_existing_instances()
+        # Set up signal handlers for cleanup
+        def signal_handler(signum, frame):
+            self.log(f"Received signal {signum}, cleaning up...")
+            self.cleanup_gstreamer()
+            sys.exit(0)
         
-        # Detect video device
-        video_dev = self.detect_video_device()
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
         
-        if not video_dev:
-            self.err("Could not find a MacroSilicon USB Video HDMI capture device")
-            return 1
-        
-        self.log(f"Selected video node: {video_dev}")
-        self.get_video_info(video_dev)
-        
-        # Detect audio card
-        audio_card = self.detect_audio_card(video_dev)
-        
-        # Restore window state
-        self.restore_window_state()
-        
-        # Launch GStreamer
-        if self.launch_gstreamer(video_dev, audio_card):
-            # Keep script running to maintain monitoring thread
-            try:
-                while self.is_process_running(self.gst_pid):
-                    time.sleep(1)
-            except KeyboardInterrupt:
-                self.log("Interrupted by user")
-            return 0
-        else:
+        try:
+            # Kill any existing instances before starting
+            self.kill_existing_instances()
+            
+            # Detect video device
+            video_dev = self.detect_video_device()
+            
+            if not video_dev:
+                self.err("Could not find a MacroSilicon USB Video HDMI capture device")
+                self.err("")
+                self.err("Troubleshooting:")
+                self.err("  1. Make sure the device is connected and recognized by the system")
+                self.err("  2. Check 'v4l2-ctl --list-devices' to see if the device appears")
+                self.err("  3. Try running with --debug to see detailed detection information")
+                self.err("  4. Verify the device is not in use by another application")
+                return 1
+            
+            self.log(f"Selected video node: {video_dev}")
+            self.get_video_info(video_dev)
+            
+            # Detect audio card
+            audio_card = self.detect_audio_card(video_dev)
+            
+            # Restore window state
+            self.restore_window_state()
+            
+            # Launch GStreamer
+            if self.launch_gstreamer(video_dev, audio_card):
+                # Keep script running to maintain monitoring thread
+                try:
+                    while self.is_process_running(self.gst_pid):
+                        time.sleep(1)
+                except KeyboardInterrupt:
+                    self.log("Interrupted by user")
+                finally:
+                    # Always cleanup on exit
+                    self.cleanup_gstreamer()
+                return 0
+            else:
+                return 1
+        except Exception as e:
+            self.err(f"Unexpected error: {e}")
+            self.cleanup_gstreamer()
             return 1
 
 

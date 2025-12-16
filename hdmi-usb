@@ -18,9 +18,44 @@ VIDEO_DEV=$(v4l2-ctl --list-devices 2>/dev/null | awk '/USB Video: USB Video/{fo
 if [ -n "$VIDEO_DEV" ]; then
     STREAM_ERR=$(v4l2-ctl -d "$VIDEO_DEV" --stream-mmap --stream-count=1 --stream-to=/dev/null 2>&1)
     if echo "$STREAM_ERR" | grep -qi "STREAMON.*error\|error.*STREAMON"; then
-        echo "[ERR] Device $VIDEO_DEV is in a bad state (STREAMON fails)"
-        echo "[ERR] Try unplugging and replugging the USB device"
-        exit 1
+        echo "[INFO] Device $VIDEO_DEV streaming failed, attempting recovery..."
+        
+        # Try USB device reset first (faster than module reload)
+        if command -v usbreset >/dev/null 2>&1; then
+            echo "[INFO] Resetting USB device..."
+            sudo usbreset 534d:2109 >/dev/null 2>&1
+            sleep 1
+        fi
+        
+        # Try to reset by reloading the uvcvideo module
+        if sudo modprobe -r uvcvideo 2>/dev/null && sudo modprobe uvcvideo 2>/dev/null; then
+            echo "[INFO] Module reloaded, waiting for device..."
+            sleep 2
+            
+            # Re-detect the device after reload
+            if ! v4l2-ctl --list-devices 2>/dev/null | grep -q "USB Video: USB Video"; then
+                echo "[ERR] Device not found after recovery attempt"
+                echo "[ERR] Try unplugging and replugging the USB device"
+                exit 1
+            fi
+            
+            # Update VIDEO_DEV after reload (device number may change)
+            VIDEO_DEV=$(v4l2-ctl --list-devices 2>/dev/null | awk '/USB Video: USB Video/{found=1; next} found && /\/dev\/video/{print $1; exit}')
+            
+            # Check if streaming works now
+            STREAM_ERR=$(v4l2-ctl -d "$VIDEO_DEV" --stream-mmap --stream-count=1 --stream-to=/dev/null 2>&1)
+            if echo "$STREAM_ERR" | grep -qi "STREAMON.*error\|error.*STREAMON"; then
+                echo "[ERR] Device $VIDEO_DEV still not streaming after recovery"
+                echo "[ERR] Check that HDMI source is connected and sending a signal"
+                echo "[ERR] Or try unplugging and replugging the USB device"
+                exit 1
+            fi
+            echo "[INFO] Device recovered successfully"
+        else
+            echo "[ERR] Recovery failed (need sudo privileges)"
+            echo "[ERR] Try: sudo modprobe -r uvcvideo && sudo modprobe uvcvideo"
+            exit 1
+        fi
     fi
 fi
 

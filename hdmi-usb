@@ -3,6 +3,27 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Check if USB Video HDMI capture device is connected
+# Uses same detection logic as hdmi-usb.py (looks for "USB Video: USB Video")
+if ! v4l2-ctl --list-devices 2>/dev/null | grep -q "USB Video: USB Video"; then
+    echo "[ERR] No USB Video HDMI capture device detected"
+    exit 1
+fi
+
+# Get the first video device from the USB Video block
+VIDEO_DEV=$(v4l2-ctl --list-devices 2>/dev/null | awk '/USB Video: USB Video/{found=1; next} found && /\/dev\/video/{print $1; exit}')
+
+# Check if device is in a bad state (STREAMON fails)
+# Uses same logic as check_device_streaming() in hdmi-usb.py
+if [ -n "$VIDEO_DEV" ]; then
+    STREAM_ERR=$(v4l2-ctl -d "$VIDEO_DEV" --stream-mmap --stream-count=1 --stream-to=/dev/null 2>&1)
+    if echo "$STREAM_ERR" | grep -qi "STREAMON.*error\|error.*STREAMON"; then
+        echo "[ERR] Device $VIDEO_DEV is in a bad state (STREAMON fails)"
+        echo "[ERR] Try unplugging and replugging the USB device"
+        exit 1
+    fi
+fi
+
 # Check if --debug is in the arguments
 DEBUG_MODE=false
 for arg in "$@"; do

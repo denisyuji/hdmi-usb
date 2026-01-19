@@ -3,3 +3,4 @@ __pycache__/
 .gitignore
 test-logs/
 screenshot_*.png
+screenshot_*.base64

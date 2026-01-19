@@ -2,7 +2,7 @@
 
 Scripts to detect and preview using cheap USB HDMI capture devices using GStreamer. Tested with MacroSilicon-based devices. You can either run a **live preview** locally on the machine connected to the capture device over USB, or run an **RTSP server** to stream the capture over the network (optionally with a local preview).
 
-The screenshot scripts also make it easy to integrate HDMI capture into an AI agent workflow: the agent can grab a frame (as a PNG and a base64 file) so it can “see” the HDMI input and, for example, verify the HDMI output of an external device connected to the capture card.
+*AI Agent Integration*: The screenshot scripts enable AI agents to "see" the HDMI input by capturing frames as PNG and base64 files. This allows agents to verify that external devices connected to the capture card are providing the expected HDMI output.
 
 ![Tested on a cheap hdmi capture card](cheap-hdmi-usb.webp)
 
@@ -65,6 +65,7 @@ Use `--help` for more options.
 Capture a single PNG frame from the HDMI device or an active RTSP stream. On success, both scripts create two files and print:
 
 ```text
+OK
 FILENAME=<absolute path to the PNG file>
 BASE64_FILE=<absolute path to the base64-encoded image file>
 ```

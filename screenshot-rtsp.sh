@@ -168,6 +168,7 @@ if [[ -f "$OUTPUT_FILE" ]]; then
   base64 "$OUTPUT_FILE" | tr -d '\n' > "$BASE64_FILE"
   
   # Output in requested format
+  echo "OK"
   echo "FILENAME=${OUTPUT_FILE}"
   echo "BASE64_FILE=${BASE64_FILE}"
   exit 0

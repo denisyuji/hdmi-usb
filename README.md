@@ -2,7 +2,7 @@
 
 Scripts to detect and preview using cheap USB HDMI capture devices using GStreamer. Tested with MacroSilicon-based devices. You can either run a **live preview** locally on the machine connected to the capture device over USB, or run an **RTSP server** to stream the capture over the network (optionally with a local preview).
 
-*AI Agent Integration*: The screenshot scripts enable AI agents to "see" the HDMI input by capturing frames as PNG and base64 files. This allows agents to verify that external devices connected to the capture card are providing the expected HDMI output.
+**AI Agent Integration**: The screenshot scripts enable AI agents to "see" the HDMI input by capturing frames as PNG and base64 files. This allows agents to verify that external devices connected to the capture card are providing the expected HDMI output.
 
 ![Tested on a cheap hdmi capture card](cheap-hdmi-usb.webp)
 
@@ -21,11 +21,20 @@ Scripts to detect and preview using cheap USB HDMI capture devices using GStream
 
 #### Live Preview
 
-Start a live preview window showing the HDMI capture:
+Start a live preview window showing the HDMI capture. You can use either:
 
+**Direct Python script:**
 ```bash
 ./hdmi-usb.py
 ```
+
+**Wrapper script with automatic device recovery:**
+```bash
+./hdmi-usb
+./hdmi-usb --debug
+```
+
+The `hdmi-usb` wrapper script automatically detects the capture device, attempts recovery if the device is in a bad state (USB reset or module reload), and runs the preview in the background. Use `--debug` to see output, otherwise it runs silently.
 
 Use `--help` for more options.
 

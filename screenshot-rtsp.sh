@@ -161,7 +161,15 @@ cleanup_temp
 
 # Check if file was created successfully
 if [[ -f "$OUTPUT_FILE" ]]; then
-  echo "${OUTPUT_FILE}"
+  # Create base64 file with same name but .base64 extension
+  BASE64_FILE="${OUTPUT_FILE%.png}.base64"
+  
+  # Encode image as base64 and save to file (remove newlines for single-line output)
+  base64 "$OUTPUT_FILE" | tr -d '\n' > "$BASE64_FILE"
+  
+  # Output in requested format
+  echo "FILENAME=${OUTPUT_FILE}"
+  echo "BASE64_FILE=${BASE64_FILE}"
   exit 0
 else
   err "Failed to capture snapshot"

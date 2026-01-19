@@ -1,19 +1,16 @@
 # HDMI USB Capture
 
-Scripts to detect and preview MacroSilicon USB HDMI capture devices using GStreamer.
+Scripts to detect and preview using cheap USB HDMI capture devices using GStreamer. This was tested with a Macrosilicon-based device.
+
+![Tested on a cheap hdmi capture card](cheap-hdmi-usb.webp)
 
 ## Features
 
 - **Auto-detection** of MacroSilicon USB Video devices
-- **Background execution** - terminal remains free for other commands
-- **Window state persistence** - remembers window position and size, automatically saves on resize
-- **Instance management** - automatically kills previous instances on startup
-- **Silent operation** - no output by default (use `--debug` for logs)
 - **Audio support** - automatically detects and uses audio from capture device
-- **Snapshot capture** - take single frame screenshots with timestamp
-- **RTSP streaming** - stream live video/audio over network
 - **Local display window** - live preview with automatic video sharing
-- **Robust cleanup** - comprehensive resource management and cleanup of processes
+- **RTSP streaming** - stream live video/audio over network
+- **Snapshot capture** - take single frame screenshots with timestamp
 - **Debug mode** - verbose logging for troubleshooting
 - **Help system** - built-in usage information
 
@@ -33,12 +30,7 @@ Scripts to detect and preview MacroSilicon USB HDMI capture devices using GStrea
 
 # Reset window position to default
 ./hdmi-usb.py --reset-window
-
-# Install system-wide
-./install.sh
 ```
-
-After installation, use `hdmi-usb` command from anywhere.
 
 #### Command Line Options
 

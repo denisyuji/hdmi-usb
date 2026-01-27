@@ -6,6 +6,9 @@ set -euo pipefail
 # Debug mode flag
 DEBUG_MODE=false
 
+# Low resolution mode flag
+LOWRES_MODE=false
+
 # Logging functions
 log() { 
   if [[ "$DEBUG_MODE" == "true" ]]; then
@@ -31,6 +34,7 @@ USAGE:
 OPTIONS:
     -d, --debug          Enable debug mode (show GStreamer logs)
     -h, --help           Show this help message
+    -l, --lowres         Generate low resolution snapshot (640x360)
     -o, --output DIR     Output directory for snapshot (default: current directory)
 
 DESCRIPTION:
@@ -40,6 +44,7 @@ DESCRIPTION:
 EXAMPLES:
     $0                   # Capture snapshot to current directory
     $0 --debug           # Capture with debug output enabled
+    $0 --lowres          # Capture low resolution snapshot (640x360)
     $0 -o ~/Pictures     # Capture snapshot to ~/Pictures directory
 
 OUTPUT:
@@ -58,6 +63,10 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       show_help
       exit 0
+      ;;
+    -l|--lowres)
+      LOWRES_MODE=true
+      shift
       ;;
     -o|--output)
       OUTPUT_DIR="$2"
@@ -124,10 +133,10 @@ for attempt in 1 2 3; do
     else
       rc=$?
       if [[ $rc -eq 2 ]]; then
-        # Device is busy but exists, accept it and proceed
-        VIDEO_DEV="$node"
-        log "Device $node is busy but will be used"
-        break
+        # Device is busy, print error and exit
+        err "Video device $node is busy (device or resource busy)"
+        err "Another process may be using the device. Please close other applications using the capture device."
+        exit 1
       fi
     fi
   done < <(pick_nodes_by_name)
@@ -165,7 +174,11 @@ TEMP_DIR=$(mktemp -d)
 TEMP_PATTERN="${TEMP_DIR}/frame_%05d.png"
 
 # Capture 100 frames (10 seconds at 10fps, or ~1.6 seconds at 60fps)
-GST_PIPELINE="v4l2src device=${VIDEO_DEV} num-buffers=100 ! image/jpeg ! jpegdec ! videoconvert ! pngenc ! multifilesink location=${TEMP_PATTERN}"
+if [[ "$LOWRES_MODE" == "true" ]]; then
+  GST_PIPELINE="v4l2src device=${VIDEO_DEV} num-buffers=100 ! image/jpeg ! jpegdec ! videoconvert ! videoscale ! video/x-raw,width=640,height=360 ! pngenc ! multifilesink location=${TEMP_PATTERN}"
+else
+  GST_PIPELINE="v4l2src device=${VIDEO_DEV} num-buffers=100 ! image/jpeg ! jpegdec ! videoconvert ! pngenc ! multifilesink location=${TEMP_PATTERN}"
+fi
 
 log "GStreamer pipeline: gst-launch-1.0 ${GST_PIPELINE}"
 
@@ -183,10 +196,19 @@ cleanup_device() {
 trap cleanup_device EXIT
 
 # Execute GStreamer command with timeout
+GST_ERROR_OUTPUT=""
 if [[ "$DEBUG_MODE" == "true" ]]; then
-  timeout 10 gst-launch-1.0 ${GST_PIPELINE}
+  GST_ERROR_OUTPUT=$(timeout 10 gst-launch-1.0 ${GST_PIPELINE} 2>&1 || true)
+  echo "$GST_ERROR_OUTPUT"
 else
-  timeout 10 gst-launch-1.0 ${GST_PIPELINE} >/dev/null 2>&1
+  GST_ERROR_OUTPUT=$(timeout 10 gst-launch-1.0 ${GST_PIPELINE} 2>&1 || true)
+fi
+
+# Check if GStreamer reported device busy error
+if echo "$GST_ERROR_OUTPUT" | grep -qi "Device.*busy\|Device or resource busy"; then
+  err "Video device ${VIDEO_DEV} is busy (device or resource busy)"
+  err "Another process may be using the device. Please close other applications using the capture device."
+  exit 1
 fi
 
 # Find and move the last frame to the output location

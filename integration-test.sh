@@ -164,6 +164,27 @@ find_preview_window_id() {
   return 1
 }
 
+random_preview_geometry() {
+  # Generate a single "random enough" 16:9 geometry that is likely to fit on
+  # most desktops, with positive X/Y so WMs behave consistently.
+  #
+  # Output: "WxH+X+Y" (e.g. 824x464+137+241)
+  local w h x y
+
+  # Width range: 640..1040 in steps of 8 (even + friendly for scaling).
+  w=$((640 + (RANDOM % 51) * 8))
+
+  # 16:9 height, rounded to even.
+  h=$(((w * 9 + 8) / 16))
+  h=$((h - (h % 2)))
+
+  # Place the window somewhere on-screen-ish.
+  x=$((40 + (RANDOM % 401)))   # 40..440
+  y=$((40 + (RANDOM % 301)))   # 40..340
+
+  echo "${w}x${h}+${x}+${y}"
+}
+
 window_geometry() {
   local win_id="$1"
   # Extract "-geometry WxH+X+Y"
@@ -249,10 +270,20 @@ PY
       g0="$(window_geometry "$win_id" || true)"
       info "Initial window geometry: ${g0:-<unknown>}"
 
+      # hdmi-usb.py intentionally ignores saving window geometry for a few
+      # seconds after startup to avoid transient WM states. Wait for that
+      # warmup window to pass so our resize gets persisted.
+      info "Waiting for window geometry save warmup..."
+      sleep 6
+
       # Move/resize to a deterministic geometry.
-      saved_geometry="760x428+220+320"
+      saved_geometry="$(random_preview_geometry)"
+      if [[ -n "$g0" && "$saved_geometry" == "$g0" ]]; then
+        saved_geometry="$(random_preview_geometry)"
+      fi
       info "Applying window geometry via wmctrl: $saved_geometry"
-      if wmctrl -i -r "$win_id" -e "0,220,320,760,428"; then
+      IFS='x+' read -r w h x y <<<"$saved_geometry"
+      if wmctrl -i -r "$win_id" -e "0,${x},${y},${w},${h}"; then
         if wait_for_window_geometry "$win_id" "$saved_geometry"; then
           mark_pass "Window: resize/move applied (${saved_geometry})"
         else

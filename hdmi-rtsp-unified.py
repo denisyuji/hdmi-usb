@@ -574,6 +574,12 @@ class LocalDisplayPipeline:
         self._restore_attempts = 0
         self._force_applied = False
         self._force_attempts = 0
+
+        # Window auto-save (GLib timer based; no background threads)
+        self._window_watch_id = None
+        self._window_watch_window_id = None
+        self._window_watch_last_geometry = None
+        self._window_watch_ignore_until = 0.0
         
         # Register cleanup function for robust cleanup
         register_cleanup(self.stop)
@@ -683,6 +689,9 @@ class LocalDisplayPipeline:
                 return not self._restore_applied and self._restore_attempts < 3
 
             GLib.timeout_add_seconds(2, retry_restore)
+
+        # Start auto-saving window geometry changes (unless --width is used).
+        self._start_window_watch()
 
         return False
 
@@ -1041,6 +1050,54 @@ class LocalDisplayPipeline:
         except Exception:
             pass
         return applied
+
+    def _start_window_watch(self) -> None:
+        """Start a GLib timer that saves window geometry whenever it changes."""
+        if self.force_width:
+            return
+
+        # Avoid double-starting.
+        if self._window_watch_id is not None:
+            return
+
+        # Ignore transient startup geometry (some WMs briefly report maximized/fullscreen).
+        self._window_watch_ignore_until = time.time() + 5.0
+
+        def _tick() -> bool:
+            # Stop if pipeline is gone or we're shutting down.
+            if not self.pipeline:
+                self._window_watch_id = None
+                return False
+
+            try:
+                # Cache window id once we can find it.
+                if not self._window_watch_window_id:
+                    self._window_watch_window_id = self.get_window_id(timeout=0.2)
+                    if not self._window_watch_window_id:
+                        return True  # keep retrying
+
+                geometry = self.get_window_geometry(self._window_watch_window_id)
+                if not geometry:
+                    return True
+
+                if geometry != self._window_watch_last_geometry:
+                    self._window_watch_last_geometry = geometry
+
+                    # Do not write the transient initial geometry.
+                    if time.time() < self._window_watch_ignore_until:
+                        return True
+
+                    self.window_state_file.write_text(geometry)
+                    self.log(f"Window geometry saved: {geometry}")
+            except Exception as e:
+                # Best-effort; don't crash the pipeline for window tooling issues.
+                self.log(f"Window save error: {e}")
+
+            return True
+
+        # Polling is acceptable here; window managers don't emit a reliable event
+        # stream we can subscribe to in this script, and this avoids extra threads.
+        self._window_watch_id = GLib.timeout_add_seconds(1, _tick)
     
     def build_pipeline(self):
         """Build local display pipeline as RTSP client.
@@ -1202,6 +1259,14 @@ class LocalDisplayPipeline:
             return
         
         try:
+            # Stop window watch timer
+            try:
+                if self._window_watch_id is not None:
+                    GLib.source_remove(self._window_watch_id)
+                    self._window_watch_id = None
+            except Exception:
+                pass
+
             if self.pipeline:
                 self.log("Stopping local display pipeline")
                 # Send EOS to gracefully stop the pipeline

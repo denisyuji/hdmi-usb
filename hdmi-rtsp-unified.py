@@ -44,6 +44,18 @@ AUDIO_BITRATE_BPS = 128000
 VIDEO_BITRATE_KBPS = 3000
 VIDEO_KEYFRAME_INTERVAL_FRAMES = 30
 
+
+def _round_even(value: int) -> int:
+    """Round down to the nearest even integer (some sinks expect even sizes)."""
+    return value if value % 2 == 0 else value - 1
+
+
+def _compute_height_for_16_9(width: int) -> int:
+    """Compute a 16:9 height for the given width."""
+    # Use rounding to preserve aspect ratio reasonably for arbitrary widths.
+    height = int(round(width * 9 / 16))
+    return _round_even(max(height, 2))
+
 def setup_gstreamer_debug():
     """Configure GStreamer logging.
 
@@ -537,13 +549,20 @@ class LocalDisplayPipeline:
     to work just like any other RTSP client.
     """
 
-    def __init__(self, rtsp_url: str, debug_mode: bool = False, server=None):
+    def __init__(
+        self,
+        rtsp_url: str,
+        debug_mode: bool = False,
+        server=None,
+        force_width: Optional[int] = None,
+    ):
         self.rtsp_url = rtsp_url
         self.debug_mode = debug_mode
         self.pipeline = None
         self.server = server  # Reference to RTSPServer for shutdown callback
         # Used to match the correct window in wmctrl output.
         self.owner_pid = os.getpid()
+        self.force_width = force_width
         
         # Window state management
         self.window_state_file = Path.home() / '.hdmi-rtsp-unified-window-state'
@@ -551,10 +570,10 @@ class LocalDisplayPipeline:
         self.restore_y = None
         self.restore_width = None
         self.restore_height = None
-        self.monitor_thread = None
-        self.monitor_running = False
         self._restore_applied = False
         self._restore_attempts = 0
+        self._force_applied = False
+        self._force_attempts = 0
         
         # Register cleanup function for robust cleanup
         register_cleanup(self.stop)
@@ -618,6 +637,29 @@ class LocalDisplayPipeline:
             return False
         self._playing_init_done = True
 
+        # If the user requested a fixed window width, force a 16:9 size and
+        # ignore saved window geometry (do not restore or overwrite it).
+        if self.force_width:
+            target_w = _round_even(max(int(self.force_width), 2))
+            target_h = _compute_height_for_16_9(target_w)
+            self.log(f"Forcing local window size: {target_w}x{target_h} (16:9)")
+
+            self._force_applied = self.apply_forced_window_size(target_w, target_h)
+            self._force_attempts = 1
+
+            def retry_force():
+                if self._force_applied:
+                    return False
+                if self._force_attempts >= 3:
+                    return False
+                self._force_attempts += 1
+                self.log(f"Retrying forced window size (attempt {self._force_attempts}/3)...")
+                self._force_applied = self.apply_forced_window_size(target_w, target_h)
+                return not self._force_applied and self._force_attempts < 3
+
+            GLib.timeout_add_seconds(2, retry_force)
+            return False
+
         if (not self._restore_applied and
             all([self.restore_x, self.restore_y, self.restore_width, self.restore_height])):
             self.log(
@@ -642,20 +684,13 @@ class LocalDisplayPipeline:
 
             GLib.timeout_add_seconds(2, retry_restore)
 
-        # Start monitoring window position in background thread (only once PLAYING).
-        import threading
-        if not self.monitor_running:
-            self.monitor_running = True
-            self.monitor_thread = threading.Thread(
-                target=self.monitor_window_state,
-                daemon=True
-            )
-            self.monitor_thread.start()
-
         return False
 
     def restore_window_state(self):
         """Restore window state from file."""
+        if self.force_width:
+            self.log("Ignoring saved window state due to --width override")
+            return
         if not self.window_state_file.exists():
             self.log("No saved window state found")
             return
@@ -898,6 +933,83 @@ class LocalDisplayPipeline:
             self.log(f"Failed to apply window state: {e}")
             return False
 
+    def _apply_window_size_to_window(self, window_id: str, width: int, height: int) -> bool:
+        """Resize the window to (width, height) while keeping the current position."""
+        # Check if wmctrl is available
+        try:
+            subprocess.run(['which', 'wmctrl'], capture_output=True,
+                           check=True, timeout=1)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            self.log("wmctrl not available, window size not applied")
+            return False
+
+        try:
+            import time
+
+            # Keep current position if we can read it, otherwise default to 0,0.
+            current_geometry = self.get_window_geometry(window_id)
+            cur_x, cur_y = 0, 0
+            if current_geometry:
+                match = re.match(r'^(\d+)x(\d+)\+(\d+)\+(\d+)$', current_geometry)
+                if match:
+                    cur_x, cur_y = int(match.group(3)), int(match.group(4))
+
+            target_w = _round_even(max(int(width), 2))
+            target_h = _round_even(max(int(height), 2))
+
+            def _clear_wm_state() -> None:
+                subprocess.run(
+                    ['wmctrl', '-i', '-r', window_id, '-b',
+                     'remove,maximized_vert,maximized_horz,fullscreen'],
+                    capture_output=True,
+                    text=True,
+                    timeout=1
+                )
+
+            def _apply_geometry() -> subprocess.CompletedProcess:
+                return subprocess.run(
+                    ['wmctrl', '-i', '-r', window_id, '-e',
+                     f"0,{cur_x},{cur_y},{target_w},{target_h}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=1
+                )
+
+            self.log(f"Applying forced window size to {window_id}...")
+
+            deadline = time.time() + 20.0
+            last_geometry = None
+            while time.time() < deadline:
+                _clear_wm_state()
+                time.sleep(0.15)
+
+                result = _apply_geometry()
+                if result.returncode != 0 and self.debug_mode:
+                    self.log(f"wmctrl -e failed: {result.stderr.strip()}")
+
+                time.sleep(0.35)
+                current_geometry = self.get_window_geometry(window_id)
+                if current_geometry:
+                    last_geometry = current_geometry
+                    match = re.match(r'^(\d+)x(\d+)\+(\d+)\+(\d+)$', current_geometry)
+                    if match:
+                        current_w = int(match.group(1))
+                        current_h = int(match.group(2))
+                        if abs(current_w - target_w) < 10 and abs(current_h - target_h) < 10:
+                            self.log(f"Forced window size applied: {target_w}x{target_h} (current={current_geometry})")
+                            print(f"[{timestamp()}] 🪟 Local window geometry: {current_geometry}")
+                            return True
+
+                time.sleep(0.25)
+
+            if last_geometry:
+                self.log(f"Forced window size did not settle; last seen: {last_geometry}")
+                print(f"[{timestamp()}] 🪟 Local window geometry (last seen): {last_geometry}")
+            return False
+        except Exception as e:
+            self.log(f"Failed to apply forced window size: {e}")
+            return False
+
     def apply_window_state(self) -> bool:
         """Apply window state after GStreamer starts."""
         if not all([self.restore_x, self.restore_y, self.restore_width, 
@@ -913,87 +1025,23 @@ class LocalDisplayPipeline:
             return False
 
         return self._apply_window_state_to_window(window_id)
-    
-    def monitor_window_state(self):
-        """Monitor window state and save changes."""
-        time.sleep(3)  # Wait for window to appear
-        
-        last_geometry = ""
-        last_width, last_height, last_x, last_y = 0, 0, 0, 0
-        # The window may appear late; keep retrying for a while.
-        window_id = None
-        start_time = time.time()
-        while self.monitor_running and self.pipeline and (time.time() - start_time) < 30:
-            window_id = self.get_window_id(timeout=2.0)
-            if window_id:
-                break
-            time.sleep(0.5)
 
+    def apply_forced_window_size(self, width: int, height: int) -> bool:
+        """Apply a forced window size after GStreamer starts."""
+        window_id = self.get_window_id(timeout=12.0)
         if not window_id:
-            self.log("Failed to find window for monitoring (timed out)")
-            return
-        
-        self.log(f"Monitoring window geometry (ID: {window_id})")
-
-        # If we failed to apply geometry earlier because the window didn't exist
-        # yet, apply it now that we have a window ID.
-        if (not self._restore_applied and
-            all([self.restore_x, self.restore_y, self.restore_width, self.restore_height])):
-            self._restore_applied = self._apply_window_state_to_window(window_id)
-
-        # If we start fullscreen/maximized, the WM may report fullscreen geometry
-        # briefly. Avoid overwriting the user's saved size with that transient
-        # startup geometry.
-        ignore_fullscreen_until = time.time() + 5
-        
-        # Print current geometry every 5 seconds (even if unchanged).
-        next_print_time = time.time()
-
-        # Monitor window position and size every 2 seconds
-        while self.monitor_running and self.pipeline:
-            try:
-                current_geometry = self.get_window_geometry(window_id)
-
-                if current_geometry and time.time() >= next_print_time:
-                    self.log(f"Window geometry (periodic): {current_geometry}")
-                    next_print_time = time.time() + 5
-                
-                if current_geometry and current_geometry != last_geometry:
-                    # Parse to detect what changed
-                    match = re.match(r'^(\d+)x(\d+)\+(\d+)\+(\d+)$', current_geometry)
-                    if match:
-                        width, height = int(match.group(1)), int(match.group(2))
-                        x, y = int(match.group(3)), int(match.group(4))
-                        
-                        changes = []
-                        if last_geometry:
-                            if width != last_width or height != last_height:
-                                changes.append(f"resized to {width}x{height}")
-                            if x != last_x or y != last_y:
-                                changes.append(f"moved to {x},{y}")
-                        
-                        # Skip saving during the initial startup window where
-                        # fullscreen/maximized geometry may be transient.
-                        if time.time() < ignore_fullscreen_until:
-                            last_width, last_height, last_x, last_y = width, height, x, y
-                            last_geometry = current_geometry
-                            continue
-
-                        self.window_state_file.write_text(current_geometry)
-                        if changes:
-                            self.log(f"Window {' and '.join(changes)} - saved ({current_geometry})")
-                        else:
-                            self.log(f"Window geometry saved: {current_geometry}")
-                        
-                        last_width, last_height, last_x, last_y = width, height, x, y
-                        last_geometry = current_geometry
-            except Exception as e:
-                self.log(f"Monitor error: {e}")
-            
-            time.sleep(2)
-        
-        self.log("Window monitoring stopped")
-
+            self.log("Window not found after waiting, forced size not applied")
+            return False
+        applied = self._apply_window_size_to_window(window_id, width, height)
+        # Always print the geometry we observe after the resize attempt.
+        try:
+            current_geometry = self.get_window_geometry(window_id)
+            if current_geometry:
+                print(f"[{timestamp()}] 🪟 Local window geometry (observed): {current_geometry}")
+        except Exception:
+            pass
+        return applied
+    
     def build_pipeline(self):
         """Build local display pipeline as RTSP client.
 
@@ -1016,9 +1064,25 @@ class LocalDisplayPipeline:
         # height changes apply but width won't).
         videoconvert = Gst.ElementFactory.make("videoconvert", "local_videoconvert")
         videoscale = Gst.ElementFactory.make("videoscale", "local_videoscale")
+        capsfilter = None
         videosink = Gst.ElementFactory.make("ximagesink", "videosink")
         if not (videoconvert and videoscale and videosink):
             raise RuntimeError("Failed to create local video sink elements")
+
+        # If the user requested a fixed window width, try to make the sink
+        # negotiate to that size (16:9). This often results in the window
+        # being created at the desired size, which is more reliable than
+        # resizing after mapping on some window managers.
+        if self.force_width:
+            target_w = _round_even(max(int(self.force_width), 2))
+            target_h = _compute_height_for_16_9(target_w)
+            capsfilter = Gst.ElementFactory.make("capsfilter", "local_capsfilter")
+            if capsfilter:
+                caps = Gst.Caps.from_string(
+                    f"video/x-raw,width={target_w},height={target_h}"
+                )
+                capsfilter.set_property("caps", caps)
+                self.log(f"Negotiating local video size: {target_w}x{target_h} (16:9)")
 
         videosink.set_property("sync", False)
         # Allow arbitrary resizing; don't enforce original aspect ratio in caps negotiation.
@@ -1030,9 +1094,17 @@ class LocalDisplayPipeline:
         video_bin = Gst.Bin.new("local_videosink_bin")
         video_bin.add(videoconvert)
         video_bin.add(videoscale)
+        if capsfilter:
+            video_bin.add(capsfilter)
         video_bin.add(videosink)
-        if not Gst.Element.link(videoconvert, videoscale) or not Gst.Element.link(videoscale, videosink):
-            raise RuntimeError("Failed to link local video sink bin elements")
+        if capsfilter:
+            if (not Gst.Element.link(videoconvert, videoscale) or
+                not Gst.Element.link(videoscale, capsfilter) or
+                not Gst.Element.link(capsfilter, videosink)):
+                raise RuntimeError("Failed to link local video sink bin elements")
+        else:
+            if not Gst.Element.link(videoconvert, videoscale) or not Gst.Element.link(videoscale, videosink):
+                raise RuntimeError("Failed to link local video sink bin elements")
 
         # Expose a 'sink' pad on the bin so playbin can connect to it.
         sink_pad = videoconvert.get_static_pad("sink")
@@ -1110,12 +1182,6 @@ class LocalDisplayPipeline:
             return
         
         try:
-            # Stop monitoring thread
-            self.monitor_running = False
-            if self.monitor_thread and self.monitor_thread.is_alive():
-                self.log("Stopping window monitoring thread...")
-                self.monitor_thread.join(timeout=3)
-            
             if self.pipeline:
                 self.log("Stopping local display pipeline")
                 # Send EOS to gracefully stop the pipeline
@@ -1356,7 +1422,7 @@ class RTSPServer(GstRtspServer.RTSPServer):
         except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
             return False
 
-    def __init__(self, audio_only=False, debug_mode=False, headless=False):
+    def __init__(self, audio_only=False, debug_mode=False, headless=False, viewer_width: Optional[int] = None):
         super().__init__()
         self.port = DEFAULT_RTSP_PORT
         self.endpoint = DEFAULT_RTSP_ENDPOINT
@@ -1365,6 +1431,7 @@ class RTSPServer(GstRtspServer.RTSPServer):
         self.main_loop = None
         self.pipeline_errors = 0
         self.local_display = None
+        self.viewer_width = viewer_width
         self.set_address("0.0.0.0")
         self.set_service(self.port)
         
@@ -1451,7 +1518,8 @@ class RTSPServer(GstRtspServer.RTSPServer):
             self.local_display = LocalDisplayPipeline(
                 rtsp_url=rtsp_url,
                 debug_mode=debug_mode,
-                server=self  # Pass server reference for shutdown callback
+                server=self,  # Pass server reference for shutdown callback
+                force_width=self.viewer_width,
             )
             if not self.local_display.start():
                 print(f"[{timestamp()}] ⚠️  Local display failed to start, "
@@ -1571,6 +1639,12 @@ COMPATIBILITY:
         help='Reset saved window position and size'
     )
     parser.add_argument(
+        '--width',
+        type=int,
+        default=None,
+        help='Force local viewer window width (16:9); ignores saved geometry'
+    )
+    parser.add_argument(
         '--debug',
         action='store_true',
         help='Enable debug output'
@@ -1609,9 +1683,12 @@ COMPATIBILITY:
             print("\033[92m🎥🎵 Starting unified RTSP server with local display "
                   "and HDMI capture\033[0m")
 
-        server = RTSPServer(audio_only=args.audio_only,
-                           debug_mode=args.debug,
-                           headless=args.headless)
+        server = RTSPServer(
+            audio_only=args.audio_only,
+            debug_mode=args.debug,
+            headless=args.headless,
+            viewer_width=args.width,
+        )
         loop = GLib.MainLoop()
         server.set_main_loop(loop)
 

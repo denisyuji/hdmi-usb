@@ -1482,176 +1482,91 @@ class LocalDisplayPipeline:
 # =============================================================================
 # RTSP Media Factory and Server
 # =============================================================================
+class RTSPServer(GstRtspServer.RTSPServer):
+    """RTSP Server for HDMI capture streaming."""
 
-class RTSPMediaFactory(GstRtspServer.RTSPMediaFactory):
-    """Factory for creating RTSP media pipelines."""
+    def _build_rtsp_launch_string(
+        self,
+        *,
+        video_device: Optional[str],
+        audio_device_spec: Optional[str],
+        audio_only: bool,
+        use_mjpeg: bool,
+    ) -> str:
+        """Build a gst-rtsp-server `set_launch()` pipeline string.
 
-    def __init__(self, video_device=None, audio_card=None, audio_only=False,
-                 debug_mode=False, server=None, use_intervideo=False,
-                 intervideo_channel=None):
-        super().__init__()
-        self.video_device = video_device
-        self.audio_card = audio_card
-        self.audio_only = audio_only
-        self.debug_mode = debug_mode
-        self.server = server
-        self.use_intervideo = use_intervideo
-        self.intervideo_channel = intervideo_channel or "hdmi-usb-channel"
-        self.set_shared(True)
+        Note: We intentionally use `set_launch()` (static pipeline) instead of a
+        dynamic `do_create_element()` implementation, because dynamic pipelines
+        in gst-rtsp-server are prone to per-client pipeline instantiation and
+        suspension quirks that can lead to v4l2 "Device is busy" and RTSP 503
+        failures when multiple clients connect (e.g., local preview + screenshot).
+        """
 
-    def check_mjpeg_support(self) -> bool:
-        """Check if the video device supports MJPEG format."""
-        try:
-            result = subprocess.run(
-                ['v4l2-ctl', '-d', self.video_device, '--list-formats-ext'],
-                capture_output=True,
-                text=True,
-                timeout=SUBPROCESS_TIMEOUT_SECONDS
+        def _build_audio(device_spec: str, payload_name: str) -> str:
+            # Quote device spec because it may contain commas (e.g. dsnoop:CARD=1,DEV=0).
+            device_spec_q = device_spec.replace('"', '\\"')
+            return (
+                f'alsasrc device="{device_spec_q}" ! '
+                f'queue max-size-time=1000000000 ! '
+                f'audioconvert ! audioresample ! '
+                f'audio/x-raw,format=S16LE,rate={AUDIO_SAMPLE_RATE_HZ},channels=2 ! '
+                f'voaacenc bitrate={AUDIO_BITRATE_BPS} ! '
+                f'rtpmp4gpay pt=97 name={payload_name}'
             )
-            return 'MJPG' in result.stdout or 'MJPEG' in result.stdout
+
+        def _build_video() -> str:
+            if not video_device:
+                raise RuntimeError("No video device specified for RTSP launch")
+
+            source = f'v4l2src device={video_device} ! '
+            decoder = 'image/jpeg ! jpegdec ! ' if use_mjpeg else 'queue ! decodebin ! '
+            encoder = (
+                f'videoconvert ! video/x-raw,format=I420 ! '
+                f'x264enc tune=zerolatency key-int-max={VIDEO_KEYFRAME_INTERVAL_FRAMES} '
+                f'bitrate={VIDEO_BITRATE_KBPS} speed-preset=veryfast '
+                f'byte-stream=true threads=1 ! '
+                f'h264parse config-interval=1 ! '
+                f'video/x-h264,stream-format=avc,alignment=au ! '
+                f'rtph264pay config-interval=1 pt=96 name=pay0'
+            )
+            return source + decoder + encoder
+
+        if audio_only:
+            if not audio_device_spec:
+                raise RuntimeError("Audio-only mode requires an audio device spec")
+            return _build_audio(audio_device_spec, "pay0")
+
+        video_pipeline = _build_video()
+        if audio_device_spec:
+            return f'{video_pipeline} {_build_audio(audio_device_spec, "pay1")}'
+        return video_pipeline
+
+    def _on_media_configure(self, _factory, media) -> None:
+        """Attach bus monitoring to each created media pipeline."""
+        try:
+            element = media.get_element()
         except Exception:
-            return True
+            element = None
 
-    def _build_audio_pipeline(self, device_spec: str, payload_name: str) -> str:
-        """Build audio pipeline string."""
-        return (
-            f'alsasrc device={device_spec} ! '
-            f'queue max-size-time=1000000000 ! '
-            f'audioconvert ! audioresample ! '
-            f'audio/x-raw,format=S16LE,rate={AUDIO_SAMPLE_RATE_HZ},channels=2 ! '
-            f'voaacenc bitrate={AUDIO_BITRATE_BPS} ! '
-            f'rtpmp4gpay pt=97 name={payload_name}'
-        )
-
-    def _build_video_pipeline(self, use_mjpeg: bool) -> str:
-        """Build video pipeline string."""
-        if self.use_intervideo:
-            # Use intervideosrc (already decoded, caps handled automatically)
-            if self.debug_mode:
-                print(f"[RTSP] Using intervideosrc channel={self.intervideo_channel}")
-            source = (
-                f'intervideosrc channel={self.intervideo_channel} ! '
-            )
-            decoder = ''
-        else:
-            # Use direct v4l2 source
-            if self.debug_mode:
-                print(f"[RTSP] Using v4l2src device={self.video_device}, "
-                      f"mjpeg={use_mjpeg}")
-            source = f'v4l2src device={self.video_device} ! '
-            
-            if use_mjpeg:
-                decoder = 'image/jpeg ! jpegdec ! '
-            else:
-                decoder = 'queue ! decodebin ! '
-
-        encoder = (
-            f'videoconvert ! video/x-raw,format=I420 ! '
-            f'x264enc tune=zerolatency key-int-max={VIDEO_KEYFRAME_INTERVAL_FRAMES} '
-            f'bitrate={VIDEO_BITRATE_KBPS} speed-preset=veryfast '
-            f'byte-stream=true threads=1 ! '
-            f'h264parse config-interval=1 ! '
-            f'video/x-h264,stream-format=avc,alignment=au ! '
-            f'rtph264pay config-interval=1 pt=96 name=pay0'
-        )
-
-        return source + decoder + encoder
-
-    def do_create_element(self, url):
-        """Create GStreamer pipeline element."""
-        if not self.use_intervideo and not self.video_device and not self.audio_only:
-            print("❌ ERROR: No video device specified!")
-            return None
-
-        if self.audio_only and not self.audio_card:
-            print("❌ ERROR: Audio-only mode requires audio card!")
-            return None
-
-        # Build pipeline based on mode
-        if self.audio_only:
-            pipeline_str = self._build_audio_pipeline(
-                f'plughw:{self.audio_card},0', 'pay0'
-            )
-        else:
-            mjpeg_supported = (self.check_mjpeg_support() 
-                             if not self.use_intervideo else False)
-            video_pipeline = self._build_video_pipeline(mjpeg_supported)
-
-            if self.audio_card:
-                audio_pipeline = self._build_audio_pipeline(
-                    f'plughw:{self.audio_card},0', 'pay1'
-                )
-                pipeline_str = f'{video_pipeline} {audio_pipeline}'
-            else:
-                pipeline_str = video_pipeline
-
-        if self.debug_mode:
-            print(f"[DEBUG] Pipeline: {pipeline_str}")
-
-        try:
-            element = Gst.parse_launch(pipeline_str)
-            if not element:
-                error_msg = "Pipeline is NULL after parse_launch"
-                print(f"❌ ERROR: {error_msg}!")
-                if self.server:
-                    self.server.on_pipeline_error(error_msg)
-                return None
-
-            return element
-        except Exception as e:
-            error_msg = f"Failed to create pipeline: {e}"
-            print(f"❌ ERROR: {error_msg}")
-            if self.server:
-                self.server.on_pipeline_error(error_msg)
-            return None
-
-    def do_configure(self, media):
-        """Configure media and set up monitoring."""
-        media.connect("prepared", self.on_media_prepared)
-        media.connect("target-state", self.on_target_state)
-        media.connect("new-state", self.on_new_state)
-
-    def on_media_prepared(self, media):
-        """Set up bus monitoring when media is prepared."""
-        element = media.get_element()
         if not element:
-            if self.server:
-                self.server.on_pipeline_error(
-                    "Media element is NULL after preparation"
-                )
             return
 
-        bus = element.get_bus()
-        if bus:
+        try:
+            bus = element.get_bus()
+        except Exception:
+            bus = None
+
+        if not bus:
+            return
+
+        try:
             bus.add_signal_watch()
-            bus.connect("message", self.on_bus_message, media)
+            bus.connect("message", self._on_media_bus_message)
+        except Exception:
+            # Best-effort; don't crash server for monitoring issues.
+            return
 
-    def on_target_state(self, media, state):
-        """Monitor target state changes."""
-        if self.debug_mode:
-            print(f"[DEBUG] Media target state: {state}")
-        return True
-
-    def on_new_state(self, media, state):
-        """Monitor state changes and detect failures."""
-        if self.debug_mode:
-            print(f"[DEBUG] Media new state: {state}")
-
-        if state == Gst.State.NULL:
-            element = media.get_element()
-            if element:
-                bus = element.get_bus()
-                if bus:
-                    msg = bus.pop_filtered(Gst.MessageType.ERROR)
-                    if msg and self.server:
-                        err, _ = msg.parse_error()
-                        self.server.on_pipeline_error(
-                            f"Media failed to start: {err.message}"
-                        )
-
-        return True
-
-    def on_bus_message(self, bus, message, media):
+    def _on_media_bus_message(self, _bus, message) -> bool:
         """Monitor bus messages for errors and warnings."""
         msg_type = message.type
 
@@ -1664,9 +1579,8 @@ class RTSPMediaFactory(GstRtspServer.RTSPMediaFactory):
 
             # Report critical errors to server
             critical_keywords = ("resource busy", "failed to", "cannot")
-            if self.server and any(kw in error_msg.lower()
-                                  for kw in critical_keywords):
-                self.server.on_pipeline_error(error_msg)
+            if any(kw in error_msg.lower() for kw in critical_keywords):
+                self.on_pipeline_error(error_msg)
 
         elif msg_type == Gst.MessageType.WARNING and self.debug_mode:
             warn, _ = message.parse_warning()
@@ -1674,20 +1588,32 @@ class RTSPMediaFactory(GstRtspServer.RTSPMediaFactory):
 
         return True
 
-
-class RTSPServer(GstRtspServer.RTSPServer):
-    """RTSP Server for HDMI capture streaming."""
-
-    def _test_audio_device_availability(self, audio_card):
-        """Test if audio device is available for RTSP streaming."""
+    def test_audio_device_spec_availability(self, device_spec: str) -> bool:
+        """Test if an ALSA capture device is available for RTSP streaming."""
         try:
             result = subprocess.run(
-                ['arecord', '-D', f'plughw:{audio_card},0', '-f', 'cd', '-d', '1', '/dev/null'],
+                ['arecord', '-D', device_spec, '-f', 'cd', '-d', '1', '/dev/null'],
                 capture_output=True, text=True, timeout=3
             )
             return result.returncode == 0
         except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
             return False
+
+    def _pick_audio_device_spec(self, audio_card: str) -> Optional[str]:
+        """Pick a good ALSA device string for capture.
+
+        Prefer `dsnoop` (shareable) to avoid "Device or resource busy" when
+        multiple RTSP sessions or other apps open the device. Fall back to
+        plughw if dsnoop isn't available.
+        """
+        candidates = [
+            f"dsnoop:CARD={audio_card},DEV=0",
+            f"plughw:{audio_card},0",
+        ]
+        for spec in candidates:
+            if self.test_audio_device_spec_availability(spec):
+                return spec
+        return None
 
     def __init__(self, audio_only=False, debug_mode=False, headless=False, viewer_width: Optional[int] = None):
         super().__init__()
@@ -1699,6 +1625,7 @@ class RTSPServer(GstRtspServer.RTSPServer):
         self.pipeline_errors = 0
         self.local_display = None
         self.viewer_width = viewer_width
+        self.audio_device_spec: Optional[str] = None
         self.set_address("0.0.0.0")
         self.set_service(self.port)
         
@@ -1720,12 +1647,13 @@ class RTSPServer(GstRtspServer.RTSPServer):
             print(f"[{timestamp()}] ✅ Found video device: {video_device}")
             if audio_card:
                 print(f"[{timestamp()}] ✅ Found audio card: {audio_card}")
-                # Test if audio device is available for RTSP streaming
-                if not self._test_audio_device_availability(audio_card):
+                # Pick a capture device spec and verify availability.
+                self.audio_device_spec = self._pick_audio_device_spec(audio_card)
+                if not self.audio_device_spec:
                     print(f"[{timestamp()}] ⚠️  Audio device busy - using video-only mode")
                     audio_card = None
                 else:
-                    print(f"[{timestamp()}] ✅ Audio device available for streaming")
+                    print(f"[{timestamp()}] ✅ Audio device available for streaming ({self.audio_device_spec})")
             else:
                 print(f"[{timestamp()}] ⚠️  No audio device found - video only")
         elif audio_only:
@@ -1738,15 +1666,38 @@ class RTSPServer(GstRtspServer.RTSPServer):
         rtsp_url = f"rtsp://127.0.0.1:{self.port}{self.endpoint}"
 
         # Create and configure factory first (server must be ready before client connects)
-        self.factory = RTSPMediaFactory(
+        # Use a static `set_launch()` factory so gst-rtsp-server can properly
+        # share a single capture pipeline across multiple RTSP clients.
+        self.factory = GstRtspServer.RTSPMediaFactory()
+        self.factory.set_shared(True)
+        if hasattr(self.factory, "set_reusable"):
+            self.factory.set_reusable(True)
+
+        use_mjpeg = False
+        if video_device and not audio_only:
+            try:
+                # Check if the video device supports MJPEG format.
+                result = subprocess.run(
+                    ['v4l2-ctl', '-d', video_device, '--list-formats-ext'],
+                    capture_output=True,
+                    text=True,
+                    timeout=SUBPROCESS_TIMEOUT_SECONDS,
+                )
+                use_mjpeg = ('MJPG' in result.stdout) or ('MJPEG' in result.stdout)
+            except Exception:
+                use_mjpeg = True
+
+        launch = self._build_rtsp_launch_string(
             video_device=video_device,
-            audio_card=audio_card,
+            audio_device_spec=self.audio_device_spec if audio_card else None,
             audio_only=audio_only,
-            debug_mode=debug_mode,
-            server=self,
-            use_intervideo=False,  # No longer using intervideo - local display is RTSP client
-            intervideo_channel=None
+            use_mjpeg=use_mjpeg,
         )
+        if self.debug_mode:
+            print(f"[DEBUG] RTSP launch: {launch}")
+        self.factory.set_launch(launch)
+        self.factory.connect("media-configure", self._on_media_configure)
+
         self.factory.set_eos_shutdown(False)
         self.factory.set_stop_on_disconnect(False)
         self.factory.set_transport_mode(GstRtspServer.RTSPTransportMode.PLAY)
@@ -1959,14 +1910,39 @@ COMPATIBILITY:
         loop = GLib.MainLoop()
         server.set_main_loop(loop)
 
-        def shutdown_handler(sig, frame):
-            print(f"\n[{timestamp()}] 👋 Shutting down RTSP server "
-                  f"gracefully...")
-            server.shutdown()
-            loop.quit()
+        def _shutdown_and_quit() -> None:
+            print(f"\n[{timestamp()}] 👋 Shutting down RTSP server gracefully...")
+            try:
+                server.shutdown()
+            finally:
+                loop.quit()
 
-        signal.signal(signal.SIGINT, shutdown_handler)
-        signal.signal(signal.SIGTERM, shutdown_handler)
+        # When the app is blocked in GLib.MainLoop().run(), Python-level signal
+        # handlers (signal.signal) may not fire promptly because the interpreter
+        # isn't regularly regaining control.
+        #
+        # Integrate SIGINT/SIGTERM with GLib so background runs stop cleanly.
+        def _glib_shutdown_handler(*_args) -> bool:
+            _shutdown_and_quit()
+            return False  # GLib.SOURCE_REMOVE
+
+        installed_glib_handlers = False
+        try:
+            unix_signal_add = getattr(GLib, "unix_signal_add", None)
+            if unix_signal_add is not None:
+                unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, _glib_shutdown_handler)
+                unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, _glib_shutdown_handler)
+                installed_glib_handlers = True
+        except Exception:
+            installed_glib_handlers = False
+
+        if not installed_glib_handlers:
+            # Fallback: best-effort Python signal handlers.
+            def shutdown_handler(sig, frame):
+                _shutdown_and_quit()
+
+            signal.signal(signal.SIGINT, shutdown_handler)
+            signal.signal(signal.SIGTERM, shutdown_handler)
 
         print(f"[{timestamp()}] 🎬 HDMI capture RTSP server ready for "
               f"connections")

@@ -42,6 +42,7 @@ rtsp_video_only() {
   local temp_pattern="${2:-}"
 
   MODE="$mode" TEMP_PATTERN="$temp_pattern" RTSP_URL="$RTSP_URL" DEBUG_MODE="$DEBUG_MODE" \
+    OUTPUT_PNG="${OUTPUT_PNG:-}" \
     RTSP_CAPTURE_SECONDS="${RTSP_CAPTURE_SECONDS:-5}" RTSP_MAX_FILES="${RTSP_MAX_FILES:-200}" \
     GST_DEBUG_NO_COLOR=1 "$PYTHON_BIN" - <<'PY'
 import os
@@ -57,6 +58,7 @@ Gst.init(None)
 mode = os.environ.get("MODE", "test")
 url = os.environ.get("RTSP_URL", "")
 debug = os.environ.get("DEBUG_MODE", "false") == "true"
+output_png = os.environ.get("OUTPUT_PNG", "")
 
 temp_pattern = os.environ.get("TEMP_PATTERN", "")
 capture_seconds = int(os.environ.get("RTSP_CAPTURE_SECONDS", "5"))
@@ -72,6 +74,10 @@ if mode not in ("test", "capture", "lowres"):
 
 if mode == "capture" and not temp_pattern:
     print("[ERR] TEMP_PATTERN is required for MODE=capture", file=sys.stderr)
+    sys.exit(2)
+
+if mode == "lowres" and not output_png:
+    print("[ERR] OUTPUT_PNG is required for MODE=lowres", file=sys.stderr)
     sys.exit(2)
 
 pipeline = Gst.Pipeline.new(f"rtsp-{mode}")
@@ -164,7 +170,13 @@ if mode == "lowres":
         print("[ERR] Failed to create lowres elements", file=sys.stderr)
         sys.exit(2)
 
-    capsfilter.set_property("caps", Gst.Caps.from_string("video/x-raw,width=640,height=360"))
+    # Force a stable, PNG-friendly raw format. Without an explicit format here,
+    # some drivers/decoders negotiate planar YUV in a way that can produce
+    # solid-color (often green) frames through pngenc on some systems.
+    capsfilter.set_property(
+        "caps",
+        Gst.Caps.from_string("video/x-raw,format=RGBA,width=640,height=360,pixel-aspect-ratio=1/1"),
+    )
     sink.set_property("emit-signals", True)
     sink.set_property("sync", False)
     sink.set_property("max-buffers", 1)
@@ -214,10 +226,20 @@ if mode == "lowres":
         if not ok:
             return Gst.FlowReturn.ERROR
         try:
-            b64 = base64.b64encode(mapinfo.data).decode("ascii")
+            png_bytes = bytes(mapinfo.data)
+            b64 = base64.b64encode(png_bytes).decode("ascii")
         finally:
             buf.unmap(mapinfo)
+
+        try:
+            with open(output_png, "wb") as f:
+                f.write(png_bytes)
+        except Exception as e:
+            print(f"[ERR] Failed to write PNG: {e}", file=sys.stderr)
+            return Gst.FlowReturn.ERROR
+
         print("OK")
+        print(f"FILENAME={output_png}")
         print("WIDTH=640")
         print("HEIGHT=360")
         print(f"BASE64={b64}")
@@ -393,12 +415,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Verify output directory exists or create it (file-writing mode only).
-if [[ "$LOWRES_MODE" != "true" ]]; then
-  if [[ ! -d "$OUTPUT_DIR" ]]; then
-    log "Creating output directory: $OUTPUT_DIR"
-    mkdir -p "$OUTPUT_DIR"
-  fi
+# Verify output directory exists or create it.
+if [[ ! -d "$OUTPUT_DIR" ]]; then
+  log "Creating output directory: $OUTPUT_DIR"
+  mkdir -p "$OUTPUT_DIR"
 fi
 
 # Validate RTSP URL format
@@ -475,8 +495,10 @@ if [[ "$LOWRES_MODE" == "true" ]]; then
   #   HEIGHT=360
   #   BASE64=<...>
   RTSP_CAPTURE_SECONDS="${RTSP_CAPTURE_SECONDS:-5}"
+  TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+  OUTPUT_FILE="${OUTPUT_DIR}/screenshot_${TIMESTAMP}_640x360.png"
   set +e
-  rtsp_video_only lowres
+  OUTPUT_PNG="$OUTPUT_FILE" rtsp_video_only lowres
   LOWRES_RC=$?
   set -e
   exit "$LOWRES_RC"

@@ -91,7 +91,7 @@ The base64-encoded image is saved to a file with the same name as the PNG but wi
 ./hdmi-usb-screenshot
 ./hdmi-usb-screenshot --output ~/Pictures
 
-# Low-res mode (no files written): print BASE64 to stdout
+# Low-res mode: save a 640x360 PNG and print BASE64 to stdout
 ./hdmi-usb-screenshot --lowres
 ```
 
@@ -99,6 +99,7 @@ In `--lowres` mode, the script prints:
 
 ```text
 OK
+FILENAME=<absolute path to the PNG file>
 WIDTH=640
 HEIGHT=360
 BASE64=<base64-encoded PNG>

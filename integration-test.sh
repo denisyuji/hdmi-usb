@@ -406,12 +406,13 @@ PY
     if [[ "$lowres_rc" != "0" ]]; then
       mark_fail "Lowres screenshot: hdmi-usb-screenshot --lowres execution"
     else
-      local b64_line
+      local b64_line png_file
       b64_line="$(echo "$lowres_out" | sed -n 's/^BASE64=//p' | tail -1)"
-      if [[ -n "$b64_line" ]]; then
-        mark_pass "Lowres screenshot: BASE64 output present"
+      png_file="$(echo "$lowres_out" | sed -n 's/^FILENAME=//p' | tail -1)"
+      if [[ -n "$b64_line" && -n "$png_file" && -f "$png_file" && -s "$png_file" ]]; then
+        mark_pass "Lowres screenshot: BASE64 + PNG output present"
       else
-        mark_fail "Lowres screenshot: BASE64 output present"
+        mark_fail "Lowres screenshot: BASE64 + PNG output present"
       fi
     fi
   else

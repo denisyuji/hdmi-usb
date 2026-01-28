@@ -47,7 +47,7 @@ Launcher script that:
 Snapshot tool for RTSP:
 - Captures a frame from an RTSP stream to `screenshot_YYYYMMDD_HHMMSS.png`
 - Writes a matching `.base64` file
-- `--lowres` prints a 640x360 PNG as `BASE64=...` (no files)
+- `--lowres` saves a 640x360 PNG and prints `BASE64=...`
 - Prints:
   - `OK`
   - `FILENAME=...`

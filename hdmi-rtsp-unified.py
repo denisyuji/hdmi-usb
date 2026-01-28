@@ -597,16 +597,24 @@ class LocalDisplayPipeline:
             err, debug_info = message.parse_error()
             error_msg = err.message
             
-            # Check if window was closed
-            if "Output window was closed" in error_msg:
+            # Check if window was closed / user requested quit (sink-specific).
+            #
+            # - ximagesink often reports: "Output window was closed"
+            # - glimagesink reports: "Quit requested"
+            is_close_request = (
+                "Output window was closed" in error_msg or
+                "Quit requested" in error_msg or
+                "quit requested" in error_msg.lower()
+            )
+
+            if is_close_request:
                 print("🔴 Local display window closed, shutting down gracefully...")
-                # Trigger graceful shutdown
+                # Trigger graceful shutdown via the main loop to avoid blocking
+                # inside the GStreamer bus callback.
                 if self.server:
-                    self.server.shutdown()
+                    GLib.idle_add(self.server.shutdown)
                 else:
-                    # If no server reference, just stop the pipeline
-                    self.stop()
-                    GLib.idle_add(lambda: self.main_loop.quit() if hasattr(self, 'main_loop') else None)
+                    GLib.idle_add(self.stop)
             else:
                 print(f"❌ Local Display ERROR: {error_msg}")
                 if self.debug_mode:
@@ -619,7 +627,7 @@ class LocalDisplayPipeline:
             # EOS can also indicate window closure, trigger shutdown
             if self.server:
                 print("🔴 Local display stream ended, shutting down gracefully...")
-                self.server.shutdown()
+                GLib.idle_add(self.server.shutdown)
         elif msg_type == Gst.MessageType.STATE_CHANGED:
             if message.src == self.pipeline:
                 old_state, new_state, pending = message.parse_state_changed()
@@ -668,9 +676,10 @@ class LocalDisplayPipeline:
 
         if (not self._restore_applied and
             all([self.restore_x, self.restore_y, self.restore_width, self.restore_height])):
+            # restore_x/restore_y may already include a sign (e.g. "-36", "+47").
             self.log(
                 f"Applying saved window geometry after PLAYING: "
-                f"{self.restore_width}x{self.restore_height}+{self.restore_x}+{self.restore_y}"
+                f"{self.restore_width}x{self.restore_height}{self.restore_x}{self.restore_y}"
             )
             self._restore_applied = self.apply_window_state()
 
@@ -709,7 +718,7 @@ class LocalDisplayPipeline:
             self.log(f"Restoring window state: {geometry}")
             
             # Parse geometry (format: WIDTHxHEIGHT+X+Y)
-            match = re.match(r'^(\d+)x(\d+)\+(\d+)\+(\d+)$', geometry)
+            match = re.match(r'^(\d+)x(\d+)([+-]\d+)([+-]\d+)$', geometry)
             if match:
                 self.restore_width = match.group(1)
                 self.restore_height = match.group(2)
@@ -749,16 +758,29 @@ class LocalDisplayPipeline:
                             if len(parts) < 4:
                                 continue
                             win_id, _desk, pid_str, wm_class = parts[:4]
+                            title = parts[4] if len(parts) >= 5 else ""
                             try:
                                 pid = int(pid_str)
                             except ValueError:
                                 continue
-                            if pid != self.owner_pid:
-                                continue
                             score = 0
-                            if 'GStreamer' in wm_class or 'ximagesink' in wm_class:
+                            wm_class_l = wm_class.lower()
+                            title_l = title.lower()
+
+                            # Prefer windows owned by this process, but don't require it:
+                            # some sinks/window systems report a different PID.
+                            if pid == self.owner_pid:
+                                score += 3
+                            if pid == 0:
+                                score += 1
+
+                            if ('gstreamer' in wm_class_l or
+                                'ximagesink' in wm_class_l or
+                                'glimagesink' in wm_class_l):
                                 score += 2
-                            if len(parts) >= 5 and 'python' in parts[4].lower():
+                            if ('gstreamer' in title_l or
+                                'opengl' in title_l or
+                                'python' in title_l):
                                 score += 1
                             candidates.append((score, win_id))
                         if candidates:
@@ -796,7 +818,11 @@ class LocalDisplayPipeline:
                 )
                 
                 for line in result2.stdout.splitlines():
-                    if 'GStreamer' in line or 'ximagesink' in line:
+                    line_l = line.lower()
+                    if ('gstreamer' in line_l or
+                        'ximagesink' in line_l or
+                        'glimagesink' in line_l or
+                        'opengl' in line_l):
                         parts = line.split()
                         if len(parts) >= 1:
                             window_id = parts[0]
@@ -851,22 +877,41 @@ class LocalDisplayPipeline:
             target_y = int(self.restore_y)
             target_w = int(self.restore_width)
             target_h = int(self.restore_height)
+            # Some window managers behave poorly with negative positions.
+            # Clamp to 0 so at least size restore is reliable.
+            apply_x = target_x if target_x >= 0 else 0
+            apply_y = target_y if target_y >= 0 else 0
 
             def _clear_wm_state() -> None:
                 # If the WM creates the window maximized/fullscreen, -e may be ignored.
                 # Clear those states first (and repeatedly, some WMs re-apply them).
-                subprocess.run(
-                    ['wmctrl', '-i', '-r', window_id, '-b',
-                     'remove,maximized_vert,maximized_horz,fullscreen'],
-                    capture_output=True,
-                    text=True,
-                    timeout=1
-                )
+                # Some WMs ignore a combined remove list; do it one-by-one.
+                for state in ("fullscreen", "maximized_vert", "maximized_horz"):
+                    subprocess.run(
+                        ['wmctrl', '-i', '-r', window_id, '-b', f'remove,{state}'],
+                        capture_output=True,
+                        text=True,
+                        timeout=1
+                    )
+
+            def _clear_size_hints() -> None:
+                # Some sinks set WM_NORMAL_HINTS that effectively clamp the window size
+                # (e.g., minimum width ~= negotiated video width). Removing these hints
+                # lets WMs apply the requested geometry.
+                try:
+                    subprocess.run(
+                        ['xprop', '-id', window_id, '-remove', 'WM_NORMAL_HINTS'],
+                        capture_output=True,
+                        text=True,
+                        timeout=1
+                    )
+                except Exception:
+                    pass
 
             def _apply_geometry() -> subprocess.CompletedProcess:
                 return subprocess.run(
                     ['wmctrl', '-i', '-r', window_id, '-e',
-                     f"0,{target_x},{target_y},{target_w},{target_h}"],
+                     f"0,{apply_x},{apply_y},{target_w},{target_h}"],
                     capture_output=True,
                     text=True,
                     timeout=1
@@ -878,8 +923,29 @@ class LocalDisplayPipeline:
             # after mapping. Give it more time to settle.
             deadline = time.time() + 20.0
             last_geometry = None
+
+            # Pre-shrink: some window managers won't release horizontal maximize/tile
+            # unless the window first becomes clearly "non-maximized".
+            try:
+                pre_w = min(target_w, 640)
+                pre_h = min(target_h, 360)
+                if pre_w != target_w or pre_h != target_h:
+                    _clear_wm_state()
+                    _clear_size_hints()
+                    subprocess.run(
+                        ['wmctrl', '-i', '-r', window_id, '-e',
+                         f"0,{apply_x},{apply_y},{pre_w},{pre_h}"],
+                        capture_output=True,
+                        text=True,
+                        timeout=1
+                    )
+                    time.sleep(0.25)
+            except Exception:
+                pass
+
             while time.time() < deadline:
                 _clear_wm_state()
+                _clear_size_hints()
                 time.sleep(0.15)
 
                 result = _apply_geometry()
@@ -890,20 +956,20 @@ class LocalDisplayPipeline:
                 current_geometry = self.get_window_geometry(window_id)
                 if current_geometry:
                     last_geometry = current_geometry
-                    match = re.match(r'^(\d+)x(\d+)\+(\d+)\+(\d+)$', current_geometry)
+                    match = re.match(r'^(\d+)x(\d+)([+-]\d+)([+-]\d+)$', current_geometry)
                     if match:
                         current_w = int(match.group(1))
                         current_h = int(match.group(2))
                         current_x = int(match.group(3))
                         current_y = int(match.group(4))
 
-                        if (abs(current_x - target_x) < 10 and
-                            abs(current_y - target_y) < 10 and
+                        if (abs(current_x - apply_x) < 10 and
+                            abs(current_y - apply_y) < 10 and
                             abs(current_w - target_w) < 10 and
                             abs(current_h - target_h) < 10):
                             self.log(
                                 f"Window geometry applied: {target_w}x{target_h} "
-                                f"at {target_x},{target_y} (current={current_geometry})"
+                                f"at {apply_x},{apply_y} (current={current_geometry})"
                             )
                             return True
 
@@ -923,6 +989,17 @@ class LocalDisplayPipeline:
                         ).stdout.strip()
                         if state_line:
                             self.log(f"Window state: {state_line}")
+                    except Exception:
+                        pass
+                    try:
+                        hints = subprocess.run(
+                            ['xprop', '-id', window_id, 'WM_NORMAL_HINTS'],
+                            capture_output=True,
+                            text=True,
+                            timeout=1
+                        ).stdout.strip()
+                        if hints:
+                            self.log(f"Window hints: {hints}")
                     except Exception:
                         pass
                     try:
@@ -959,7 +1036,7 @@ class LocalDisplayPipeline:
             current_geometry = self.get_window_geometry(window_id)
             cur_x, cur_y = 0, 0
             if current_geometry:
-                match = re.match(r'^(\d+)x(\d+)\+(\d+)\+(\d+)$', current_geometry)
+                match = re.match(r'^(\d+)x(\d+)([+-]\d+)([+-]\d+)$', current_geometry)
                 if match:
                     cur_x, cur_y = int(match.group(3)), int(match.group(4))
 
@@ -967,13 +1044,28 @@ class LocalDisplayPipeline:
             target_h = _round_even(max(int(height), 2))
 
             def _clear_wm_state() -> None:
-                subprocess.run(
-                    ['wmctrl', '-i', '-r', window_id, '-b',
-                     'remove,maximized_vert,maximized_horz,fullscreen'],
-                    capture_output=True,
-                    text=True,
-                    timeout=1
-                )
+                # Some WMs ignore a combined remove list; do it one-by-one.
+                for state in ("fullscreen", "maximized_vert", "maximized_horz"):
+                    subprocess.run(
+                        ['wmctrl', '-i', '-r', window_id, '-b', f'remove,{state}'],
+                        capture_output=True,
+                        text=True,
+                        timeout=1
+                    )
+
+            def _clear_size_hints() -> None:
+                # Some sinks set WM_NORMAL_HINTS that effectively clamp the window size
+                # (e.g., minimum width ~= negotiated video width). Removing these hints
+                # lets WMs apply the requested geometry.
+                try:
+                    subprocess.run(
+                        ['xprop', '-id', window_id, '-remove', 'WM_NORMAL_HINTS'],
+                        capture_output=True,
+                        text=True,
+                        timeout=1
+                    )
+                except Exception:
+                    pass
 
             def _apply_geometry() -> subprocess.CompletedProcess:
                 return subprocess.run(
@@ -990,6 +1082,7 @@ class LocalDisplayPipeline:
             last_geometry = None
             while time.time() < deadline:
                 _clear_wm_state()
+                _clear_size_hints()
                 time.sleep(0.15)
 
                 result = _apply_geometry()
@@ -1000,7 +1093,7 @@ class LocalDisplayPipeline:
                 current_geometry = self.get_window_geometry(window_id)
                 if current_geometry:
                     last_geometry = current_geometry
-                    match = re.match(r'^(\d+)x(\d+)\+(\d+)\+(\d+)$', current_geometry)
+                    match = re.match(r'^(\d+)x(\d+)([+-]\d+)([+-]\d+)$', current_geometry)
                     if match:
                         current_w = int(match.group(1))
                         current_h = int(match.group(2))
@@ -1014,6 +1107,41 @@ class LocalDisplayPipeline:
             if last_geometry:
                 self.log(f"Forced window size did not settle; last seen: {last_geometry}")
                 print(f"[{timestamp()}] 🪟 Local window geometry (last seen): {last_geometry}")
+                if self.debug_mode:
+                    try:
+                        state_line = subprocess.run(
+                            ['xprop', '-id', window_id, '_NET_WM_STATE'],
+                            capture_output=True,
+                            text=True,
+                            timeout=1
+                        ).stdout.strip()
+                        if state_line:
+                            self.log(f"Window state: {state_line}")
+                    except Exception:
+                        pass
+                    try:
+                        hints = subprocess.run(
+                            ['xprop', '-id', window_id, 'WM_NORMAL_HINTS'],
+                            capture_output=True,
+                            text=True,
+                            timeout=1
+                        ).stdout.strip()
+                        if hints:
+                            self.log(f"Window hints: {hints}")
+                    except Exception:
+                        pass
+                    try:
+                        info = subprocess.run(
+                            ['xwininfo', '-id', window_id, '-wm'],
+                            capture_output=True,
+                            text=True,
+                            timeout=2
+                        ).stdout
+                        for line in info.splitlines():
+                            if 'Minimum Size' in line or 'Maximum Size' in line:
+                                self.log(line.strip())
+                    except Exception:
+                        pass
             return False
         except Exception as e:
             self.log(f"Failed to apply forced window size: {e}")
@@ -1121,45 +1249,26 @@ class LocalDisplayPipeline:
         # height changes apply but width won't).
         videoconvert = Gst.ElementFactory.make("videoconvert", "local_videoconvert")
         videoscale = Gst.ElementFactory.make("videoscale", "local_videoscale")
-        capsfilter = None
-        videosink = Gst.ElementFactory.make("ximagesink", "videosink")
+
+        # Prefer a sink that can scale to an arbitrarily-resized window without
+        # requiring caps that force a specific width/height.
+        #
+        # If we fall back to sinks that effectively clamp the window width to the
+        # negotiated frame width, WM-based resizing may not be able to shrink.
+        videosink = (
+            Gst.ElementFactory.make("glimagesink", "videosink") or
+            Gst.ElementFactory.make("xvimagesink", "videosink") or
+            Gst.ElementFactory.make("ximagesink", "videosink")
+        )
         if not (videoconvert and videoscale and videosink):
             raise RuntimeError("Failed to create local video sink elements")
-
-        # Try to make the sink negotiate to a size that matches the intended window.
-        #
-        # This is significantly more reliable than relying purely on window manager
-        # resizing after mapping. Some setups effectively clamp the window width to
-        # the negotiated video width (you'll see height changes apply but width won't).
-        if self.force_width:
-            target_w = _round_even(max(int(self.force_width), 2))
-            target_h = _compute_height_for_16_9(target_w)
-            capsfilter = Gst.ElementFactory.make("capsfilter", "local_capsfilter")
-            if capsfilter:
-                caps = Gst.Caps.from_string(
-                    f"video/x-raw,width={target_w},height={target_h}"
-                )
-                capsfilter.set_property("caps", caps)
-                self.log(f"Negotiating local video size: {target_w}x{target_h} (16:9)")
-        elif self.restore_width and self.restore_height:
-            # When restoring a saved window size, negotiate video to that size as
-            # well, otherwise some sinks/WMs will refuse to shrink the window width.
+        if self.debug_mode:
             try:
-                target_w = _round_even(max(int(self.restore_width), 2))
-                target_h = _round_even(max(int(self.restore_height), 2))
-                capsfilter = Gst.ElementFactory.make("capsfilter", "local_capsfilter")
-                if capsfilter:
-                    caps = Gst.Caps.from_string(
-                        f"video/x-raw,width={target_w},height={target_h}"
-                    )
-                    capsfilter.set_property("caps", caps)
-                    self.log(
-                        f"Negotiating local video size from saved geometry: "
-                        f"{target_w}x{target_h}"
-                    )
+                factory = videosink.get_factory()
+                sink_name = factory.get_name() if factory else type(videosink).__name__
+                self.log(f"Using local videosink: {sink_name}")
             except Exception:
-                # Best-effort: if parsing fails, fall back to default negotiation.
-                capsfilter = None
+                pass
 
         videosink.set_property("sync", False)
         # Allow arbitrary resizing; don't enforce original aspect ratio in caps negotiation.
@@ -1171,17 +1280,9 @@ class LocalDisplayPipeline:
         video_bin = Gst.Bin.new("local_videosink_bin")
         video_bin.add(videoconvert)
         video_bin.add(videoscale)
-        if capsfilter:
-            video_bin.add(capsfilter)
         video_bin.add(videosink)
-        if capsfilter:
-            if (not Gst.Element.link(videoconvert, videoscale) or
-                not Gst.Element.link(videoscale, capsfilter) or
-                not Gst.Element.link(capsfilter, videosink)):
-                raise RuntimeError("Failed to link local video sink bin elements")
-        else:
-            if not Gst.Element.link(videoconvert, videoscale) or not Gst.Element.link(videoscale, videosink):
-                raise RuntimeError("Failed to link local video sink bin elements")
+        if not Gst.Element.link(videoconvert, videoscale) or not Gst.Element.link(videoscale, videosink):
+            raise RuntimeError("Failed to link local video sink bin elements")
 
         # Expose a 'sink' pad on the bin so playbin can connect to it.
         sink_pad = videoconvert.get_static_pad("sink")

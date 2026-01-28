@@ -217,6 +217,11 @@ if mode == "lowres":
     src.connect("pad-added", on_src_pad_added)
     decode.connect("pad-added", on_decode_pad_added)
 
+    # The first decoded frame after an RTSP connect can be bogus (often a solid
+    # green frame before a keyframe arrives). Keep the latest frame for a short
+    # period, then write/print the last one.
+    last_png = {"data": None}
+
     def on_new_sample(appsink):
         sample = appsink.emit("pull-sample")
         if not sample:
@@ -226,18 +231,27 @@ if mode == "lowres":
         if not ok:
             return Gst.FlowReturn.ERROR
         try:
-            png_bytes = bytes(mapinfo.data)
-            b64 = base64.b64encode(png_bytes).decode("ascii")
+            last_png["data"] = bytes(mapinfo.data)
         finally:
             buf.unmap(mapinfo)
+        return Gst.FlowReturn.OK
+
+    def finish_lowres_capture():
+        png_bytes = last_png["data"]
+        if not png_bytes:
+            print("[ERR] No frames captured from RTSP stream", file=sys.stderr)
+            loop.quit()
+            return False
 
         try:
             with open(output_png, "wb") as f:
                 f.write(png_bytes)
         except Exception as e:
             print(f"[ERR] Failed to write PNG: {e}", file=sys.stderr)
-            return Gst.FlowReturn.ERROR
+            loop.quit()
+            return False
 
+        b64 = base64.b64encode(png_bytes).decode("ascii")
         print("OK")
         print(f"FILENAME={output_png}")
         print("WIDTH=640")
@@ -245,12 +259,12 @@ if mode == "lowres":
         print(f"BASE64={b64}")
         state["ok"] = True
         loop.quit()
-        return Gst.FlowReturn.OK
+        return False
 
     sink.connect("new-sample", on_new_sample)
 
     pipeline.set_state(Gst.State.PLAYING)
-    GLib.timeout_add_seconds(max(2, capture_seconds), lambda: (loop.quit(), False)[1])
+    GLib.timeout_add_seconds(max(2, capture_seconds), finish_lowres_capture)
     loop.run()
     pipeline.set_state(Gst.State.NULL)
     sys.exit(0 if state["ok"] else 1)

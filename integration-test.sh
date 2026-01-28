@@ -242,6 +242,25 @@ PY
     goto_summary=true
   fi
 
+  # --- CLI feature sanity checks (no device required) ---
+  #
+  # `hdmi-usb.py --reset-window` clears this file and exits. Validate it via the
+  # wrapper script (`hdmi-usb`) too, since it has special-casing to skip device
+  # preflight for print-and-exit flags.
+  local window_state_file_real="$HOME/.hdmi-rtsp-unified-window-state"
+  info "Testing --reset-window (via wrapper): ${window_state_file_real}"
+  echo "800x450+10+10" >"$window_state_file_real"
+  set +e
+  "${ROOT_DIR}/hdmi-usb" --reset-window >>"$LOG_FILE" 2>&1
+  local reset_rc=$?
+  set -e
+  if [[ "$reset_rc" == "0" && ! -f "$window_state_file_real" ]]; then
+    mark_pass "Reset-window: clears saved window state"
+  else
+    mark_fail "Reset-window: clears saved window state"
+    goto_summary=true
+  fi
+
   read -r RTSP_HOST RTSP_PORT < <(parse_rtsp_host_port "$RTSP_URL")
 
   # --- Start server and verify port is open ---
@@ -324,6 +343,28 @@ PY
         info "Screenshot OK: $png_file"
       else
         mark_fail "Screenshot: output files present/non-empty"
+      fi
+    fi
+
+    info "Running screenshot tool (alt) against RTSP server: screenshot-rtsp.sh"
+    local rtsp_shot_out
+    set +e
+    rtsp_shot_out="$(timeout "$SCREENSHOT_TIMEOUT_SECONDS" "${ROOT_DIR}/screenshot-rtsp.sh" -o "$TEST_LOG_DIR" -u "$RTSP_URL" 2>&1)"
+    local rtsp_shot_rc=$?
+    set -e
+    echo "$rtsp_shot_out" >>"$LOG_FILE"
+    if [[ "$rtsp_shot_rc" != "0" ]]; then
+      mark_fail "Screenshot: screenshot-rtsp.sh execution"
+    else
+      local rtsp_png_file rtsp_base64_file
+      rtsp_png_file="$(echo "$rtsp_shot_out" | sed -n 's/^FILENAME=//p' | tail -1)"
+      rtsp_base64_file="$(echo "$rtsp_shot_out" | sed -n 's/^BASE64_FILE=//p' | tail -1)"
+
+      if [[ -n "$rtsp_png_file" && -f "$rtsp_png_file" && -s "$rtsp_png_file" && -n "$rtsp_base64_file" && -f "$rtsp_base64_file" && -s "$rtsp_base64_file" ]]; then
+        mark_pass "Screenshot: screenshot-rtsp.sh execution"
+        info "Screenshot OK: $rtsp_png_file"
+      else
+        mark_fail "Screenshot: screenshot-rtsp.sh output files present/non-empty"
       fi
     fi
   else

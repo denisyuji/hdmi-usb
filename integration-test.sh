@@ -5,7 +5,7 @@
 # - RTSP server can start and listen on 1234
 # - Local preview window can be moved/resized
 # - Window geometry is saved and restored across restarts
-# - screenshot-hdmi-usb captures a frame while the server runs in background
+# - hdmi-usb-screenshot captures a frame while the server runs in background
 #
 # Notes:
 # - Window tests require an X11 session with DISPLAY set and tools: wmctrl, xwininfo.
@@ -327,19 +327,19 @@ PY
     info "Running screenshot tool against RTSP server"
     local shot_out
     set +e
-    shot_out="$(timeout "$SCREENSHOT_TIMEOUT_SECONDS" "${ROOT_DIR}/screenshot-hdmi-usb" -o "$TEST_LOG_DIR" -u "$RTSP_URL" 2>&1)"
+    shot_out="$(timeout "$SCREENSHOT_TIMEOUT_SECONDS" "${ROOT_DIR}/hdmi-usb-screenshot" -o "$TEST_LOG_DIR" -u "$RTSP_URL" 2>&1)"
     local shot_rc=$?
     set -e
     echo "$shot_out" >>"$LOG_FILE"
     if [[ "$shot_rc" != "0" ]]; then
-      mark_fail "Screenshot: screenshot-hdmi-usb execution"
+      mark_fail "Screenshot: hdmi-usb-screenshot execution"
     else
       local png_file base64_file
       png_file="$(echo "$shot_out" | sed -n 's/^FILENAME=//p' | tail -1)"
       base64_file="$(echo "$shot_out" | sed -n 's/^BASE64_FILE=//p' | tail -1)"
 
       if [[ -n "$png_file" && -f "$png_file" && -s "$png_file" && -n "$base64_file" && -f "$base64_file" && -s "$base64_file" ]]; then
-        mark_pass "Screenshot: screenshot-hdmi-usb execution"
+        mark_pass "Screenshot: hdmi-usb-screenshot execution"
         info "Screenshot OK: $png_file"
       else
         mark_fail "Screenshot: output files present/non-empty"
@@ -347,7 +347,7 @@ PY
     fi
 
   else
-    mark_skip "Screenshot: screenshot-hdmi-usb execution (server not ready)"
+    mark_skip "Screenshot: hdmi-usb-screenshot execution (server not ready)"
   fi
 
   # --- Restart server and verify restore (optional) ---
@@ -396,19 +396,19 @@ PY
 
     local headless_shot_out
     set +e
-    headless_shot_out="$(timeout "$SCREENSHOT_TIMEOUT_SECONDS" "${ROOT_DIR}/screenshot-hdmi-usb" -o "$TEST_LOG_DIR" -u "$RTSP_URL" 2>&1)"
+    headless_shot_out="$(timeout "$SCREENSHOT_TIMEOUT_SECONDS" "${ROOT_DIR}/hdmi-usb-screenshot" -o "$TEST_LOG_DIR" -u "$RTSP_URL" 2>&1)"
     local headless_shot_rc=$?
     set -e
     echo "$headless_shot_out" >>"$LOG_FILE"
     if [[ "$headless_shot_rc" != "0" ]]; then
-      mark_fail "Headless: screenshot-hdmi-usb execution"
+      mark_fail "Headless: hdmi-usb-screenshot execution"
     else
       local headless_png_file headless_base64_file
       headless_png_file="$(echo "$headless_shot_out" | sed -n 's/^FILENAME=//p' | tail -1)"
       headless_base64_file="$(echo "$headless_shot_out" | sed -n 's/^BASE64_FILE=//p' | tail -1)"
 
       if [[ -n "$headless_png_file" && -f "$headless_png_file" && -s "$headless_png_file" && -n "$headless_base64_file" && -f "$headless_base64_file" && -s "$headless_base64_file" ]]; then
-        mark_pass "Headless: screenshot-hdmi-usb execution"
+        mark_pass "Headless: hdmi-usb-screenshot execution"
         info "Headless screenshot OK: $headless_png_file"
       else
         mark_fail "Headless: screenshot output files present/non-empty"

@@ -6,8 +6,7 @@ This project provides automated HDMI capture device detection and streaming for 
 
 The current codebase centers around a single unified Python RTSP server (`hdmi-usb.py`) plus small shell helpers:
 - A wrapper launcher (`hdmi-usb`) that can do device preflight/recovery and run the server in the background.
-- A snapshot tool (`screenshot-hdmi-usb`) that captures a PNG (and base64) from the RTSP stream.
-- An alternate snapshot tool (`screenshot-rtsp.sh`) that captures a PNG (and base64) from an RTSP stream (video-only).
+- A snapshot tool (`hdmi-usb-screenshot`) that captures a PNG (and base64) from the RTSP stream.
 
 ## Key Components
 
@@ -44,7 +43,7 @@ Launcher script that:
 - Translates wrapper-only `-d` into `hdmi-usb.py --debug`.
 - Runs `hdmi-usb.py` in the background. If neither `--debug` nor `--gst-debug` is set, it runs silently (`>/dev/null`).
 
-### screenshot-hdmi-usb
+### hdmi-usb-screenshot
 Snapshot tool for RTSP:
 - Captures a frame from an RTSP stream to `screenshot_YYYYMMDD_HHMMSS.png`
 - Writes a matching `.base64` file

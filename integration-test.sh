@@ -110,6 +110,14 @@ start_server_bg() {
   info "Server pid=$SERVER_PID log=$LOG_FILE"
 }
 
+start_server_bg_headless() {
+  info "Starting server in background (headless): hdmi-usb.py --debug --headless"
+  # Use -u so logs flush promptly to file.
+  python3 -u "${ROOT_DIR}/hdmi-usb.py" --debug --headless >>"$LOG_FILE" 2>&1 &
+  SERVER_PID="$!"
+  info "Server pid=$SERVER_PID log=$LOG_FILE"
+}
+
 parse_rtsp_host_port() {
   # echo "host port"
   local url="$1"
@@ -319,6 +327,44 @@ PY
     fi
   else
     mark_skip "Window: restore saved geometry (skipped)"
+  fi
+
+  # --- Headless mode sanity check ---
+  if [[ "$goto_summary" != "true" ]]; then
+    info "Running headless mode test (--headless): start server + screenshot"
+    kill_server "$SERVER_PID"
+    SERVER_PID=""
+    sleep 2
+
+    start_server_bg_headless
+    if wait_for_tcp "$RTSP_HOST" "$RTSP_PORT"; then
+      mark_pass "Headless: RTSP server creation (${RTSP_HOST}:${RTSP_PORT})"
+    else
+      mark_fail "Headless: RTSP server creation (${RTSP_HOST}:${RTSP_PORT})"
+    fi
+
+    local headless_shot_out
+    set +e
+    headless_shot_out="$(timeout "$SCREENSHOT_TIMEOUT_SECONDS" "${ROOT_DIR}/screenshot-hdmi-usb" -o "$TEST_LOG_DIR" -u "$RTSP_URL" 2>&1)"
+    local headless_shot_rc=$?
+    set -e
+    echo "$headless_shot_out" >>"$LOG_FILE"
+    if [[ "$headless_shot_rc" != "0" ]]; then
+      mark_fail "Headless: screenshot-hdmi-usb execution"
+    else
+      local headless_png_file headless_base64_file
+      headless_png_file="$(echo "$headless_shot_out" | sed -n 's/^FILENAME=//p' | tail -1)"
+      headless_base64_file="$(echo "$headless_shot_out" | sed -n 's/^BASE64_FILE=//p' | tail -1)"
+
+      if [[ -n "$headless_png_file" && -f "$headless_png_file" && -s "$headless_png_file" && -n "$headless_base64_file" && -f "$headless_base64_file" && -s "$headless_base64_file" ]]; then
+        mark_pass "Headless: screenshot-hdmi-usb execution"
+        info "Headless screenshot OK: $headless_png_file"
+      else
+        mark_fail "Headless: screenshot output files present/non-empty"
+      fi
+    fi
+  else
+    mark_skip "Headless: start server + screenshot (skipped)"
   fi
 
   # --- Summary ---

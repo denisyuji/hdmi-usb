@@ -1693,8 +1693,6 @@ class RTSPServer(GstRtspServer.RTSPServer):
             audio_only=audio_only,
             use_mjpeg=use_mjpeg,
         )
-        if self.debug_mode:
-            print(f"[DEBUG] RTSP launch: {launch}")
         self.factory.set_launch(launch)
         self.factory.connect("media-configure", self._on_media_configure)
 
@@ -1887,8 +1885,6 @@ COMPATIBILITY:
     # Kill existing instances before starting (from hdmi-usb.py)
     script_name = os.path.basename(__file__)
     kill_existing_instances(script_name, debug_mode=args.debug)
-    if args.debug:
-        print(f"[INFO] Instance management: checked for existing instances")
 
     server = None
     try:

@@ -45,12 +45,32 @@ VIDEO_BITRATE_KBPS = 3000
 VIDEO_KEYFRAME_INTERVAL_FRAMES = 30
 
 def setup_gstreamer_debug():
-    """Setup GStreamer debug environment variables if debug mode is requested."""
+    """Configure GStreamer logging.
+
+    This project distinguishes between:
+    - App debug logs (our `[INFO]`, `[LOCAL]`, etc.) via `--debug`
+    - GStreamer debug logs via `--gst-debug`
+
+    By default, we keep GStreamer logs quiet to avoid drowning out app logs.
+    """
     import sys
-    if '--debug' in sys.argv:
+
+    argv = set(sys.argv)
+
+    # If the user explicitly requests GStreamer logs, enable them.
+    if '--gst-debug' in argv:
         # Set general debug level to 3, but suppress videodecoder warnings (level 1 = errors only)
-        os.environ['GST_DEBUG'] = '3,videodecoder:1'
+        os.environ['GST_DEBUG'] = os.environ.get('GST_DEBUG', '3,videodecoder:1')
         os.environ['GST_DEBUG_NO_COLOR'] = '1'
+        return
+
+    # If app debug is enabled (or even in normal mode), keep GStreamer quiet unless
+    # the user explicitly opted in via --gst-debug.
+    #
+    # This also prevents an externally-set GST_DEBUG from spamming output when the
+    # user just wants `[LOCAL]` debug messages.
+    os.environ['GST_DEBUG'] = '0'
+    os.environ['GST_DEBUG_NO_COLOR'] = '1'
 
 # Setup debug environment before GStreamer initialization
 setup_gstreamer_debug()
@@ -107,9 +127,14 @@ def kill_existing_instances(script_name: str = "hdmi-rtsp-unified.py", debug_mod
             print(f"[INSTANCE] {message}")
     
     try:
-        # Find all python processes running this script (excluding current process)
+        # Find all python processes running this script (excluding current process).
+        #
+        # Important: we anchor the regex to the beginning of the command line so
+        # we do NOT match wrapper processes like `timeout 30 python3 ...`.
+        # If we kill `timeout`, it will typically terminate *this* process.
+        python_cmd_re = rf'(^|.*/)(python3?|python)\s+.*{re.escape(script_name)}'
         result = subprocess.run(
-            ['pgrep', '-f', f'python.*{script_name}'],
+            ['pgrep', '-f', python_cmd_re],
             capture_output=True,
             text=True,
             timeout=2
@@ -505,25 +530,20 @@ class HDMIDeviceDetector:
 # =============================================================================
 
 class LocalDisplayPipeline:
-    """Manages local display pipeline for live preview.
+    """Manages local display pipeline as an RTSP client.
     
-    When share_video=True, uses a tee element to split the video stream:
-    - One branch goes to local display (ximagesink)
-    - Another branch goes to intervideosink for sharing with RTSP clients
-    This solves the problem of v4l2src devices only supporting single access.
+    Connects to the RTSP server as a client to display the stream locally.
+    This approach avoids device sharing complexity and allows the local view
+    to work just like any other RTSP client.
     """
 
-    def __init__(self, video_device: str, audio_card: Optional[str] = None,
-                 debug_mode: bool = False, share_video: bool = False,
-                 server=None):
-        self.video_device = video_device
-        self.audio_card = audio_card
+    def __init__(self, rtsp_url: str, debug_mode: bool = False, server=None):
+        self.rtsp_url = rtsp_url
         self.debug_mode = debug_mode
-        self.share_video = share_video
         self.pipeline = None
-        self.shared_memory_socket_path = "/tmp/hdmi-usb-video-shm"
-        self.intervideo_channel_name = "hdmi-usb-channel"
         self.server = server  # Reference to RTSPServer for shutdown callback
+        # Used to match the correct window in wmctrl output.
+        self.owner_pid = os.getpid()
         
         # Window state management
         self.window_state_file = Path.home() / '.hdmi-rtsp-unified-window-state'
@@ -533,6 +553,8 @@ class LocalDisplayPipeline:
         self.restore_height = None
         self.monitor_thread = None
         self.monitor_running = False
+        self._restore_applied = False
+        self._restore_attempts = 0
         
         # Register cleanup function for robust cleanup
         register_cleanup(self.stop)
@@ -573,13 +595,64 @@ class LocalDisplayPipeline:
             if self.server:
                 print("🔴 Local display stream ended, shutting down gracefully...")
                 self.server.shutdown()
-        elif msg_type == Gst.MessageType.STATE_CHANGED and self.debug_mode:
+        elif msg_type == Gst.MessageType.STATE_CHANGED:
             if message.src == self.pipeline:
                 old_state, new_state, pending = message.parse_state_changed()
-                self.log(f"State changed: {old_state.value_nick} -> "
-                        f"{new_state.value_nick}")
+                if self.debug_mode:
+                    self.log(f"State changed: {old_state.value_nick} -> "
+                            f"{new_state.value_nick}")
+
+                # Only attempt window operations once we are actually PLAYING.
+                # Before that, the sink window often doesn't exist yet.
+                if new_state == Gst.State.PLAYING:
+                    GLib.idle_add(self._on_pipeline_playing)
 
         return True
+
+    def _on_pipeline_playing(self):
+        """Called once the pipeline reaches PLAYING.
+
+        This is the earliest reliable point where the sink window exists.
+        """
+        if getattr(self, "_playing_init_done", False):
+            return False
+        self._playing_init_done = True
+
+        if (not self._restore_applied and
+            all([self.restore_x, self.restore_y, self.restore_width, self.restore_height])):
+            self.log(
+                f"Applying saved window geometry after PLAYING: "
+                f"{self.restore_width}x{self.restore_height}+{self.restore_x}+{self.restore_y}"
+            )
+            self._restore_applied = self.apply_window_state()
+
+            # If it didn't stick immediately, retry a few times; WMs often
+            # re-tile/re-maximize shortly after PLAYING.
+            self._restore_attempts = 1
+
+            def retry_restore():
+                if self._restore_applied:
+                    return False
+                if self._restore_attempts >= 3:
+                    return False
+                self._restore_attempts += 1
+                self.log(f"Retrying window restore (attempt {self._restore_attempts}/3)...")
+                self._restore_applied = self.apply_window_state()
+                return not self._restore_applied and self._restore_attempts < 3
+
+            GLib.timeout_add_seconds(2, retry_restore)
+
+        # Start monitoring window position in background thread (only once PLAYING).
+        import threading
+        if not self.monitor_running:
+            self.monitor_running = True
+            self.monitor_thread = threading.Thread(
+                target=self.monitor_window_state,
+                daemon=True
+            )
+            self.monitor_thread.start()
+
+        return False
 
     def restore_window_state(self):
         """Restore window state from file."""
@@ -616,6 +689,43 @@ class LocalDisplayPipeline:
         
         while time.time() - start_time < timeout:
             try:
+                # Method 0 (most reliable): match windows by PID via `wmctrl -lp`.
+                # Output format: WIN_ID DESK PID WM_CLASS TITLE...
+                try:
+                    wmctrl_lp = subprocess.run(
+                        ['wmctrl', '-lp'],
+                        capture_output=True,
+                        text=True,
+                        timeout=1
+                    )
+                    if wmctrl_lp.returncode == 0:
+                        candidates = []
+                        for line in wmctrl_lp.stdout.splitlines():
+                            parts = line.split(None, 4)
+                            if len(parts) < 4:
+                                continue
+                            win_id, _desk, pid_str, wm_class = parts[:4]
+                            try:
+                                pid = int(pid_str)
+                            except ValueError:
+                                continue
+                            if pid != self.owner_pid:
+                                continue
+                            score = 0
+                            if 'GStreamer' in wm_class or 'ximagesink' in wm_class:
+                                score += 2
+                            if len(parts) >= 5 and 'python' in parts[4].lower():
+                                score += 1
+                            candidates.append((score, win_id))
+                        if candidates:
+                            candidates.sort(reverse=True)
+                            best = candidates[0][1]
+                            self.log(f"Found window ID by PID {self.owner_pid}: {best}")
+                            return best
+                except Exception:
+                    # wmctrl may be missing; fall back to other methods below.
+                    pass
+
                 # Method 1: Look for window named "python3" (most common with Gst.parse_launch)
                 result = subprocess.run(
                     ['xwininfo', '-name', 'python3'],
@@ -677,72 +787,132 @@ class LocalDisplayPipeline:
         
         return None
     
-    def apply_window_state(self):
-        """Apply window state after GStreamer starts."""
-        if not all([self.restore_x, self.restore_y, self.restore_width, 
-                   self.restore_height]):
-            return
-        
-        window_id = self.get_window_id(timeout=2.0)
-        
-        if window_id:
-            # Check if wmctrl is available
-            try:
-                subprocess.run(['which', 'wmctrl'], capture_output=True, 
-                             check=True, timeout=1)
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-                self.log("wmctrl not available, window position not restored")
-                return
-            
-            # Apply position immediately
-            try:
-                result = subprocess.run(
-                    ['wmctrl', '-i', '-r', window_id, '-e', 
-                     f"0,{self.restore_x},{self.restore_y},"
-                     f"{self.restore_width},{self.restore_height}"],
+    def _apply_window_state_to_window(self, window_id: str) -> bool:
+        """Apply the saved window geometry to a specific window ID.
+
+        Returns True if the geometry appears to have been applied.
+        """
+        # Check if wmctrl is available
+        try:
+            subprocess.run(['which', 'wmctrl'], capture_output=True,
+                           check=True, timeout=1)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            self.log("wmctrl not available, window position not restored")
+            return False
+
+        try:
+            import time
+
+            target_x = int(self.restore_x)
+            target_y = int(self.restore_y)
+            target_w = int(self.restore_width)
+            target_h = int(self.restore_height)
+
+            def _clear_wm_state() -> None:
+                # If the WM creates the window maximized/fullscreen, -e may be ignored.
+                # Clear those states first (and repeatedly, some WMs re-apply them).
+                subprocess.run(
+                    ['wmctrl', '-i', '-r', window_id, '-b',
+                     'remove,maximized_vert,maximized_horz,fullscreen'],
                     capture_output=True,
                     text=True,
                     timeout=1
                 )
-                if result.returncode == 0:
-                    self.log(f"Window geometry applied: {self.restore_width}x{self.restore_height} "
-                             f"at {self.restore_x},{self.restore_y}")
-                else:
-                    self.log(f"Failed to apply window geometry: {result.stderr}")
-                
-                # Verify position and size were applied
-                time.sleep(0.5)
+
+            def _apply_geometry() -> subprocess.CompletedProcess:
+                return subprocess.run(
+                    ['wmctrl', '-i', '-r', window_id, '-e',
+                     f"0,{target_x},{target_y},{target_w},{target_h}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=1
+                )
+
+            self.log(f"Applying window geometry to {window_id}...")
+
+            # Some window managers will re-apply maximize/tile state shortly
+            # after mapping. Give it more time to settle.
+            deadline = time.time() + 20.0
+            last_geometry = None
+            while time.time() < deadline:
+                _clear_wm_state()
+                time.sleep(0.15)
+
+                result = _apply_geometry()
+                if result.returncode != 0 and self.debug_mode:
+                    self.log(f"wmctrl -e failed: {result.stderr.strip()}")
+
+                time.sleep(0.35)
                 current_geometry = self.get_window_geometry(window_id)
-                
                 if current_geometry:
-                    match = re.match(r'^(\d+)x(\d+)\+(\d+)\+(\d+)$', 
-                                   current_geometry)
+                    last_geometry = current_geometry
+                    match = re.match(r'^(\d+)x(\d+)\+(\d+)\+(\d+)$', current_geometry)
                     if match:
-                        current_width = int(match.group(1))
-                        current_height = int(match.group(2))
+                        current_w = int(match.group(1))
+                        current_h = int(match.group(2))
                         current_x = int(match.group(3))
                         current_y = int(match.group(4))
-                        
-                        # If position or size doesn't match, try once more
-                        if (abs(current_x - int(self.restore_x)) >= 10 or 
-                            abs(current_y - int(self.restore_y)) >= 10 or
-                            abs(current_width - int(self.restore_width)) >= 10 or
-                            abs(current_height - int(self.restore_height)) >= 10):
-                            self.log(f"Geometry mismatch, retrying: "
-                                   f"got {current_width}x{current_height}+{current_x}+{current_y}, "
-                                   f"want {self.restore_width}x{self.restore_height}+"
-                                   f"{self.restore_x}+{self.restore_y}")
-                            subprocess.run(
-                                ['wmctrl', '-i', '-r', window_id, '-e', 
-                                 f"0,{self.restore_x},{self.restore_y},"
-                                 f"{self.restore_width},{self.restore_height}"],
-                                capture_output=True,
-                                timeout=1
+
+                        if (abs(current_x - target_x) < 10 and
+                            abs(current_y - target_y) < 10 and
+                            abs(current_w - target_w) < 10 and
+                            abs(current_h - target_h) < 10):
+                            self.log(
+                                f"Window geometry applied: {target_w}x{target_h} "
+                                f"at {target_x},{target_y} (current={current_geometry})"
                             )
-            except Exception as e:
-                self.log(f"Failed to apply window state: {e}")
-        else:
+                            return True
+
+                time.sleep(0.25)
+
+            if last_geometry:
+                self.log(
+                    f"Window geometry did not settle to saved state; last seen: {last_geometry}"
+                )
+                if self.debug_mode:
+                    try:
+                        state_line = subprocess.run(
+                            ['xprop', '-id', window_id, '_NET_WM_STATE'],
+                            capture_output=True,
+                            text=True,
+                            timeout=1
+                        ).stdout.strip()
+                        if state_line:
+                            self.log(f"Window state: {state_line}")
+                    except Exception:
+                        pass
+                    try:
+                        info = subprocess.run(
+                            ['xwininfo', '-id', window_id, '-wm'],
+                            capture_output=True,
+                            text=True,
+                            timeout=2
+                        ).stdout
+                        for line in info.splitlines():
+                            if 'Minimum Size' in line or 'Maximum Size' in line:
+                                self.log(line.strip())
+                    except Exception:
+                        pass
+            return False
+        except Exception as e:
+            self.log(f"Failed to apply window state: {e}")
+            return False
+
+    def apply_window_state(self) -> bool:
+        """Apply window state after GStreamer starts."""
+        if not all([self.restore_x, self.restore_y, self.restore_width, 
+                   self.restore_height]):
+            return False
+
+        # The window can take a few seconds to appear after the pipeline is set
+        # to PLAYING (especially when using `playbin`). Be patient and retry.
+        window_id = self.get_window_id(timeout=12.0)
+        
+        if not window_id:
             self.log("Window not found after waiting, position not restored")
+            return False
+
+        return self._apply_window_state_to_window(window_id)
     
     def monitor_window_state(self):
         """Monitor window state and save changes."""
@@ -750,18 +920,43 @@ class LocalDisplayPipeline:
         
         last_geometry = ""
         last_width, last_height, last_x, last_y = 0, 0, 0, 0
-        window_id = self.get_window_id(timeout=2.0)
-        
+        # The window may appear late; keep retrying for a while.
+        window_id = None
+        start_time = time.time()
+        while self.monitor_running and self.pipeline and (time.time() - start_time) < 30:
+            window_id = self.get_window_id(timeout=2.0)
+            if window_id:
+                break
+            time.sleep(0.5)
+
         if not window_id:
-            self.log("Failed to find window for monitoring")
+            self.log("Failed to find window for monitoring (timed out)")
             return
         
         self.log(f"Monitoring window geometry (ID: {window_id})")
+
+        # If we failed to apply geometry earlier because the window didn't exist
+        # yet, apply it now that we have a window ID.
+        if (not self._restore_applied and
+            all([self.restore_x, self.restore_y, self.restore_width, self.restore_height])):
+            self._restore_applied = self._apply_window_state_to_window(window_id)
+
+        # If we start fullscreen/maximized, the WM may report fullscreen geometry
+        # briefly. Avoid overwriting the user's saved size with that transient
+        # startup geometry.
+        ignore_fullscreen_until = time.time() + 5
         
+        # Print current geometry every 5 seconds (even if unchanged).
+        next_print_time = time.time()
+
         # Monitor window position and size every 2 seconds
         while self.monitor_running and self.pipeline:
             try:
                 current_geometry = self.get_window_geometry(window_id)
+
+                if current_geometry and time.time() >= next_print_time:
+                    self.log(f"Window geometry (periodic): {current_geometry}")
+                    next_print_time = time.time() + 5
                 
                 if current_geometry and current_geometry != last_geometry:
                     # Parse to detect what changed
@@ -777,9 +972,16 @@ class LocalDisplayPipeline:
                             if x != last_x or y != last_y:
                                 changes.append(f"moved to {x},{y}")
                         
+                        # Skip saving during the initial startup window where
+                        # fullscreen/maximized geometry may be transient.
+                        if time.time() < ignore_fullscreen_until:
+                            last_width, last_height, last_x, last_y = width, height, x, y
+                            last_geometry = current_geometry
+                            continue
+
                         self.window_state_file.write_text(current_geometry)
                         if changes:
-                            self.log(f"Window {' and '.join(changes)} - saved")
+                            self.log(f"Window {' and '.join(changes)} - saved ({current_geometry})")
                         else:
                             self.log(f"Window geometry saved: {current_geometry}")
                         
@@ -792,71 +994,74 @@ class LocalDisplayPipeline:
         
         self.log("Window monitoring stopped")
 
-    def build_pipeline(self) -> str:
-        """Build local display pipeline string."""
-        # Video pipeline with tee for sharing if needed
-        if self.share_video:
-            # Decode ONCE, then use tee to split to display and intervideosink
-            # intervideosink/src properly handles caps negotiation
-            video_pipeline = (
-                f'v4l2src device={self.video_device} ! '
-                'jpegdec ! videoconvert ! tee name=t '
-                't. ! queue ! videoscale ! ximagesink sync=false '
-                't. ! queue ! '
-                f'intervideosink channel={self.intervideo_channel_name}'
-            )
-        else:
-            # Simple pipeline without sharing
-            video_pipeline = (
-                f'v4l2src device={self.video_device} ! '
-                'queue ! decodebin ! videoconvert ! videoscale ! '
-                'ximagesink sync=false'
-            )
+    def build_pipeline(self):
+        """Build local display pipeline as RTSP client.
 
-        # Add audio if available
-        if self.audio_card:
-            audio_device = f'plughw:{self.audio_card},0'
-            audio_pipeline = (
-                f'alsasrc device={audio_device} ! '
-                'audioconvert ! audioresample ! autoaudiosink sync=false'
-            )
-            return f'{video_pipeline} {audio_pipeline}'
-        else:
-            return video_pipeline
+        We use `playbin` instead of manually wiring `rtspsrc` pads.
+        RTSP commonly exposes multiple RTP streams (audio + video), and
+        trying to feed those multiple pads into a single decodebin sink
+        can lead to `GST_PAD_LINK_WAS_LINKED` and “not-linked” failures.
+        """
+        playbin = Gst.ElementFactory.make("playbin", "playbin")
+        if not playbin:
+            raise RuntimeError("Failed to create playbin element")
 
-    def _is_audio_device_available(self) -> bool:
-        """Check if the audio device is available."""
-        if not self.audio_card:
-            return False
-        
+        playbin.set_property("uri", self.rtsp_url)
+
+        # Prefer explicit sinks so window behavior is stable.
+        #
+        # Also, build a small videosink bin that includes videoscale so the
+        # window can be resized freely. Without an explicit videoscale element,
+        # some setups end up effectively clamping the window width (you'll see
+        # height changes apply but width won't).
+        videoconvert = Gst.ElementFactory.make("videoconvert", "local_videoconvert")
+        videoscale = Gst.ElementFactory.make("videoscale", "local_videoscale")
+        videosink = Gst.ElementFactory.make("ximagesink", "videosink")
+        if not (videoconvert and videoscale and videosink):
+            raise RuntimeError("Failed to create local video sink elements")
+
+        videosink.set_property("sync", False)
+        # Allow arbitrary resizing; don't enforce original aspect ratio in caps negotiation.
         try:
-            result = subprocess.run(
-                ['arecord', '-l'],
-                capture_output=True,
-                text=True,
-                timeout=2
-            )
-            return f'card {self.audio_card}:' in result.stdout
+            videosink.set_property("force-aspect-ratio", False)
         except Exception:
-            return False
+            pass
+
+        video_bin = Gst.Bin.new("local_videosink_bin")
+        video_bin.add(videoconvert)
+        video_bin.add(videoscale)
+        video_bin.add(videosink)
+        if not Gst.Element.link(videoconvert, videoscale) or not Gst.Element.link(videoscale, videosink):
+            raise RuntimeError("Failed to link local video sink bin elements")
+
+        # Expose a 'sink' pad on the bin so playbin can connect to it.
+        sink_pad = videoconvert.get_static_pad("sink")
+        if not sink_pad:
+            raise RuntimeError("Failed to get videoconvert sink pad for ghosting")
+        ghost_pad = Gst.GhostPad.new("sink", sink_pad)
+        video_bin.add_pad(ghost_pad)
+
+        audiosink = Gst.ElementFactory.make("autoaudiosink", "audiosink")
+        if not audiosink:
+            raise RuntimeError("Failed to create autoaudiosink for local display")
+        audiosink.set_property("sync", False)
+
+        playbin.set_property("video-sink", video_bin)
+        playbin.set_property("audio-sink", audiosink)
+
+        return playbin
 
     def start(self) -> bool:
-        """Start the local display pipeline."""
-        # Check audio device availability
-        if self.audio_card and not self._is_audio_device_available():
-            self.log(f"Audio card {self.audio_card} not available, running video-only")
-            self.audio_card = None
-        
+        """Start the local display pipeline as RTSP client."""
         # Restore window state before starting
         self.restore_window_state()
+        self._playing_init_done = False
         
-        pipeline_str = self.build_pipeline()
-
         if self.debug_mode:
-            print(f"[LOCAL] Pipeline: {pipeline_str}")
+            print(f"[LOCAL] Building RTSP client pipeline for: {self.rtsp_url}")
 
         try:
-            self.pipeline = Gst.parse_launch(pipeline_str)
+            self.pipeline = self.build_pipeline()
             if not self.pipeline:
                 print("❌ ERROR: Failed to create local display pipeline")
                 return False
@@ -888,38 +1093,7 @@ class LocalDisplayPipeline:
                 self.log("Pipeline started immediately")
 
             self.log("Local display pipeline started successfully")
-            
-            # Show info to user
-            if self.audio_card:
-                card_id_path = Path(f"/proc/asound/card{self.audio_card}/id")
-                audio_card_name = "unknown"
-                if card_id_path.exists():
-                    try:
-                        audio_card_name = card_id_path.read_text().strip()
-                    except Exception:
-                        pass
-                print(f"[{timestamp()}] 🖥️  Local display showing video+audio "
-                      f"(card {self.audio_card}: {audio_card_name})")
-            else:
-                print(f"[{timestamp()}] 🖥️  Local display showing video only")
-
-            # Apply window state if we have saved position
-            if all([self.restore_x, self.restore_y, self.restore_width, 
-                   self.restore_height]):
-                self.log(f"Restoring window to saved size: "
-                        f"{self.restore_width}x{self.restore_height} "
-                        f"at position: {self.restore_x},{self.restore_y}")
-                time.sleep(0.5)
-                self.apply_window_state()
-            
-            # Start monitoring window position in background thread
-            import threading
-            self.monitor_running = True
-            self.monitor_thread = threading.Thread(
-                target=self.monitor_window_state, 
-                daemon=True
-            )
-            self.monitor_thread.start()
+            print(f"[{timestamp()}] 🖥️  Local display connected as RTSP client")
 
             return True
 
@@ -1225,35 +1399,19 @@ class RTSPServer(GstRtspServer.RTSPServer):
                 "Audio-only mode requires manual audio card specification"
             )
 
-        # Determine if we need to share video source
+        # Determine if we need local display (as RTSP client)
         use_local_display = not self.headless and video_device and not audio_only
-        intervideo_channel_name = "hdmi-usb-channel"
+        rtsp_url = f"rtsp://127.0.0.1:{self.port}{self.endpoint}"
 
-        # Start local display first if not in headless mode
-        if use_local_display:
-            print(f"[{timestamp()}] 🖥️  Starting local display...")
-            self.local_display = LocalDisplayPipeline(
-                video_device=video_device,
-                audio_card=audio_card,
-                debug_mode=debug_mode,
-                share_video=True,  # Enable video sharing for RTSP
-                server=self  # Pass server reference for shutdown callback
-            )
-            if not self.local_display.start():
-                print(f"[{timestamp()}] ⚠️  Local display failed to start, "
-                      f"continuing with RTSP server only")
-                self.local_display = None
-                use_local_display = False
-
-        # Create and configure factory
+        # Create and configure factory first (server must be ready before client connects)
         self.factory = RTSPMediaFactory(
             video_device=video_device,
             audio_card=audio_card,
             audio_only=audio_only,
             debug_mode=debug_mode,
             server=self,
-            use_intervideo=use_local_display,  # Use intervideo if local display is running
-            intervideo_channel=intervideo_channel_name
+            use_intervideo=False,  # No longer using intervideo - local display is RTSP client
+            intervideo_channel=None
         )
         self.factory.set_eos_shutdown(False)
         self.factory.set_stop_on_disconnect(False)
@@ -1263,7 +1421,12 @@ class RTSPServer(GstRtspServer.RTSPServer):
         # Mount and attach server
         mount_points = self.get_mount_points()
         mount_points.add_factory(self.endpoint, self.factory)
-        self.attach(None)
+        attach_id = self.attach(None)
+        if attach_id == 0:
+            raise RuntimeError(
+                f"Failed to attach RTSP server to port {self.port}. "
+                f"Port may be in use or permission denied."
+            )
         self.connect("client-connected", self.on_client_connected)
 
         # Print server status
@@ -1277,6 +1440,23 @@ class RTSPServer(GstRtspServer.RTSPServer):
         print(f"[{timestamp()}] 📡 Streaming mode: {mode_info}")
         if self.headless:
             print(f"[{timestamp()}] 🚫 Headless mode: local display disabled")
+        
+        # Start local display as RTSP client after server is ready
+        if use_local_display:
+            # Wait longer for server to be fully ready and accept connections
+            # The server needs time to bind to the port and be ready
+            print(f"[{timestamp()}] 🖥️  Waiting for RTSP server to be ready...")
+            time.sleep(3)  # Increased wait time for server to be fully ready
+            print(f"[{timestamp()}] 🖥️  Starting local display as RTSP client...")
+            self.local_display = LocalDisplayPipeline(
+                rtsp_url=rtsp_url,
+                debug_mode=debug_mode,
+                server=self  # Pass server reference for shutdown callback
+            )
+            if not self.local_display.start():
+                print(f"[{timestamp()}] ⚠️  Local display failed to start, "
+                      f"continuing with RTSP server only")
+                self.local_display = None
 
     def on_client_connected(self, server, client):
         """Handle client connection."""
@@ -1394,6 +1574,11 @@ COMPATIBILITY:
         '--debug',
         action='store_true',
         help='Enable debug output'
+    )
+    parser.add_argument(
+        '--gst-debug',
+        action='store_true',
+        help='Enable GStreamer debug output (very verbose)'
     )
     args = parser.parse_args()
     

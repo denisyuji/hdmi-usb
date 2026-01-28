@@ -85,11 +85,11 @@ BASE64_FILE=<absolute path to the base64-encoded image file>
 
 The base64-encoded image is saved to a file with the same name as the PNG but with a `.base64` extension (e.g., `screenshot_20240101_120000.base64`).
 
-#### From HDMI capture device (`screenshot.sh`)
+#### From HDMI capture device (`screenshot-hdmi-usb`)
 
 ```bash
-./screenshot.sh
-./screenshot.sh --output ~/Pictures
+./screenshot-hdmi-usb
+./screenshot-hdmi-usb --output ~/Pictures
 ```
 
 #### From RTSP stream (`screenshot-rtsp.sh`)

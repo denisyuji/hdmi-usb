@@ -2,62 +2,78 @@
 
 ## Overview
 
-This project provides automated HDMI capture device detection and preview functionality for MacroSilicon USB devices.
+This project provides automated HDMI capture device detection and streaming for cheap MacroSilicon USB HDMI capture devices.
+
+The current codebase centers around a single unified Python RTSP server (`hdmi-usb.py`) plus small shell helpers:
+- A wrapper launcher (`hdmi-usb`) that can do device preflight/recovery and run the server in the background.
+- A snapshot tool (`screenshot-hdmi-usb`) that captures a PNG (and base64) from the RTSP stream.
 
 ## Key Components
 
 ### hdmi-usb.py
-Python implementation with the following features:
+Unified HDMI USB RTSP server (and local preview).
 
-- **Implementation**: Object-oriented Python 3 implementation
-- **Dependencies**: Uses only Python standard library (no external PyPI dependencies)
-- **Code Organization**: HDMICapture class with clean separation of concerns
-- **Threading**: Background window monitoring using threading
+- **Implementation**: Python 3 using GStreamer via GI (`gi.repository.Gst`, `GstRtspServer`, `GLib`)
+- **Dependencies**: no PyPI deps, but requires system packages for GStreamer + GI bindings
 
-**Features:**
-- **Device Detection**: Uses `v4l2-ctl` to identify MacroSilicon USB Video devices
-- **Resolution Filtering**: Ensures device supports high-resolution capture (1920x1080/1280x720)
-- **GStreamer Pipeline**: `v4l2src → decodebin → videoconvert → videoscale → ximagesink`
-- **Window Management**: Automatic position/size saving and restoration using `wmctrl`
-- **Instance Cleanup**: Automatically kills previous instances and orphaned GStreamer processes on startup
-- **Background Execution**: Runs GStreamer silently without blocking terminal
-- **Process Monitoring**: Improved PID detection finds actual gst-launch process (not shell PID)
-- **Window Monitoring**: Robust monitoring checks both process PID and window existence
-- **Debug Mode**: `--debug` flag enables verbose logging for troubleshooting
-- **Help System**: `--help` flag provides usage information
-- **Window State Persistence**: Monitors and saves window position/size changes in real-time (every 2 seconds)
+**Core behavior:**
+- **Device detection**: uses `v4l2-ctl` to find likely MacroSilicon devices (by name and capabilities) and validates device state (STREAMON test).
+- **Instance management**: kills other `hdmi-usb.py` instances and orphaned `gst-launch-1.0 ... v4l2src` processes to avoid device conflicts.
+- **RTSP server**:
+  - Serves RTSP at `rtsp://0.0.0.0:1234/hdmi` (default).
+  - Uses a **static `RTSPMediaFactory.set_launch()` pipeline** so multiple RTSP clients don’t trigger multiple `v4l2src` opens (prevents `Device is busy` / RTSP `503` issues).
+- **Local preview**:
+  - By default, the local preview is an **RTSP client** (`playbin`) connecting to the local server.
+  - Window geometry is saved/restored and the window is kept at 16:9.
+- **Audio**:
+  - Attempts to match an ALSA capture card to the same USB device path as the video node.
+  - Uses `arecord` to probe whether a capture device is available (prefers shareable `dsnoop`, falls back to `plughw`).
+  - Can be forced via `AUDIO_FORCE_CARD=<n>`; `--audio-only` mode requires a forced card.
 
-### snapshot.sh
-- **Device Detection**: Reuses same device detection logic as hdmi-usb.py
-- **Single Frame Capture**: Uses `num-buffers=1` to capture exactly one frame
-- **GStreamer Pipeline**: `v4l2src → decodebin → videoconvert → pngenc → filesink`
-- **Timestamp Naming**: Saves files as `snapshot_YYYYMMDD_HHMMSS.png`
-- **Clean Output**: Returns only file path on success (stdout)
-- **Output Directory**: Configurable via `-o` flag (default: current directory)
-- **Debug Mode**: `--debug` flag enables verbose logging
-- **Help System**: `--help` flag provides usage information
+**CLI flags (see `--help`):**
+- `--headless`: disable local preview window
+- `--width <px>`: force local viewer window width (16:9)
+- `--debug`: enable app logs (`[INFO]`, `[LOCAL]`, etc.)
+- `--gst-debug`: enable GStreamer logs (very verbose)
+- `--reset-window`: clear saved window geometry (`~/.hdmi-rtsp-unified-window-state`)
+
+### hdmi-usb (wrapper)
+Launcher script that:
+- Performs a quick device preflight and attempts recovery on bad STREAMON state (USB reset / `uvcvideo` reload).
+- Translates wrapper-only `-d` into `hdmi-usb.py --debug`.
+- Runs `hdmi-usb.py` in the background. If neither `--debug` nor `--gst-debug` is set, it runs silently (`>/dev/null`).
+
+### screenshot-hdmi-usb
+Snapshot tool for RTSP:
+- Captures a frame from an RTSP stream to `screenshot_YYYYMMDD_HHMMSS.png`
+- Writes a matching `.base64` file
+- Prints:
+  - `OK`
+  - `FILENAME=...`
+  - `BASE64_FILE=...`
+
+**Important behavior:** it is **video-only** and explicitly rejects the RTSP audio stream **before SETUP** using `rtspsrc`’s `select-stream` signal.
 
 ### install.sh
-- **System Installation**: Copies script to `~/.local/bin/hdmi-usb`
+- **System Installation**: Copies scripts to `~/.local/bin/` (`hdmi-usb.py`, `hdmi-usb`)
 - **PATH Management**: Automatically adds `~/.local/bin` to shell PATH
 - **Shell Detection**: Supports bash, zsh, fish, and other shells
 
 ## Technical Details
 
-- **Device Identification**: Looks for "USB Video: USB Video" devices with high-resolution support
-- **Window State**: Saved to `~/.hdmi-usb-window-state` in format `WIDTHxHEIGHT+X+Y`
-- **Window Monitoring**: Monitors window geometry every 2 seconds, saves on any change
-- **Instance Management**: Uses `pgrep` to find and kill existing Python/GStreamer processes
-- **PID Detection**: When using `shell=True`, finds actual gst-launch process via process tree traversal
-- **Audio Detection**: Attempts to match ALSA cards by USB device path
-- **Error Handling**: Graceful fallbacks for missing dependencies, robust monitoring continues even if PID detection fails
+- **Window state**: saved to `~/.hdmi-rtsp-unified-window-state` as `WIDTHxHEIGHT+X+Y`
+- **Window tooling**: uses `wmctrl`, `xwininfo`, and `xprop` (best-effort; missing tools shouldn’t crash the server)
+- **RTSP multi-client robustness**: static server pipeline avoids per-client capture opens
+- **Audio matching**: prefers ALSA card on same USB path as the video device
+- **Shutdown/cleanup**: robust cleanup via `atexit` registry + GLib signal integration
 
 ## Dependencies
 
 - `v4l2-ctl` - Video device enumeration
-- `gst-launch-1.0` - GStreamer pipeline execution
-- `wmctrl` - Window positioning
-- `xwininfo` - Window information
+- `gstreamer1.0-*` and `gir1.2-gst-rtsp-server-1.0` - RTSP server and plugins
+- `python3-gi` - GI bindings
+- `arecord` (alsa-utils) - audio device probe
+- `wmctrl`, `xwininfo`, `xprop` - optional window positioning/inspection
 - `lsusb` - USB device listing
 
 ## Commit Message Guidelines
@@ -79,7 +95,7 @@ When making commits to this project, please generate commit messages that adhere
 
 ## Usage Guidelines
 
-- **Always use a timeout**: When testing or troubleshooting, always run the script with a timeout to avoid it runs forever.
-- **Always use --debug flag**: When testing or troubleshooting, always run the script with the `--debug` flag to see detailed logs and GStreamer output.
-- **Default mode is silent**: Without `--debug`, the script runs silently with no output unless there are errors.
+- **Always use a timeout**: when testing/troubleshooting, prefer `timeout ...` so the server doesn’t run forever.
+- **Prefer `--debug` (and `--gst-debug` when needed)**: start with app logs, enable GStreamer logs only when diagnosing pipeline issues.
+- **Default mode is quiet**: without `--debug`/`--gst-debug`, the wrapper runs the server silently unless there are errors.
 - **Window state management**: Use `--reset-window` to clear saved window position/size if needed.

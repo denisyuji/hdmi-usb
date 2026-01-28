@@ -4,7 +4,10 @@ echo "[INFO] Installing hdmi-usb..."
 mkdir -p ~/.local/bin
 cp ./hdmi-usb.py ~/.local/bin/hdmi-usb.py
 cp ./hdmi-usb ~/.local/bin/hdmi-usb
-chmod +x ~/.local/bin/hdmi-usb
+cp ./screenshot-hdmi-usb ~/.local/bin/screenshot-hdmi-usb
+
+# Ensure scripts are executable
+chmod +x ~/.local/bin/hdmi-usb ~/.local/bin/hdmi-usb.py ~/.local/bin/screenshot-hdmi-usb
 
 # === Ensure ~/.local/bin is in PATH ===
 if ! echo ":$PATH:" | grep -q ":$HOME/.local/bin:"; then
@@ -47,3 +50,4 @@ fi
 
 echo "[INFO] hdmi-usb installed successfully!"
 echo "[INFO] You can now use hdmi-usb by running 'hdmi-usb' in your terminal."
+echo "[INFO] Screenshot tool: 'screenshot-hdmi-usb'"

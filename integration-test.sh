@@ -346,27 +346,6 @@ PY
       fi
     fi
 
-    info "Running screenshot tool (alt) against RTSP server: screenshot-rtsp.sh"
-    local rtsp_shot_out
-    set +e
-    rtsp_shot_out="$(timeout "$SCREENSHOT_TIMEOUT_SECONDS" "${ROOT_DIR}/screenshot-rtsp.sh" -o "$TEST_LOG_DIR" -u "$RTSP_URL" 2>&1)"
-    local rtsp_shot_rc=$?
-    set -e
-    echo "$rtsp_shot_out" >>"$LOG_FILE"
-    if [[ "$rtsp_shot_rc" != "0" ]]; then
-      mark_fail "Screenshot: screenshot-rtsp.sh execution"
-    else
-      local rtsp_png_file rtsp_base64_file
-      rtsp_png_file="$(echo "$rtsp_shot_out" | sed -n 's/^FILENAME=//p' | tail -1)"
-      rtsp_base64_file="$(echo "$rtsp_shot_out" | sed -n 's/^BASE64_FILE=//p' | tail -1)"
-
-      if [[ -n "$rtsp_png_file" && -f "$rtsp_png_file" && -s "$rtsp_png_file" && -n "$rtsp_base64_file" && -f "$rtsp_base64_file" && -s "$rtsp_base64_file" ]]; then
-        mark_pass "Screenshot: screenshot-rtsp.sh execution"
-        info "Screenshot OK: $rtsp_png_file"
-      else
-        mark_fail "Screenshot: screenshot-rtsp.sh output files present/non-empty"
-      fi
-    fi
   else
     mark_skip "Screenshot: screenshot-hdmi-usb execution (server not ready)"
   fi

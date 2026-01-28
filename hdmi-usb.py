@@ -605,11 +605,16 @@ class LocalDisplayPipeline:
         if msg_type == Gst.MessageType.ERROR:
             err, debug_info = message.parse_error()
             error_msg = err.message
-            
+
             # Check if window was closed / user requested quit (sink-specific).
             #
             # - ximagesink often reports: "Output window was closed"
             # - glimagesink reports: "Quit requested"
+            #
+            # On some systems/messages, the exact text can vary, and we still
+            # want a window close (or any fatal local display error) to shut
+            # down the whole application instead of leaving the RTSP server
+            # running in the background with no UI.
             is_close_request = (
                 "Output window was closed" in error_msg or
                 "Quit requested" in error_msg or
@@ -618,16 +623,18 @@ class LocalDisplayPipeline:
 
             if is_close_request:
                 print("🔴 Local display window closed, shutting down gracefully...")
-                # Trigger graceful shutdown via the main loop to avoid blocking
-                # inside the GStreamer bus callback.
-                if self.server:
-                    GLib.idle_add(self.server.shutdown)
-                else:
-                    GLib.idle_add(self.stop)
             else:
                 print(f"❌ Local Display ERROR: {error_msg}")
                 if self.debug_mode:
                     print(f"   Debug: {debug_info}")
+
+            # Treat any local-display ERROR as fatal: trigger graceful shutdown
+            # via the main loop so the process terminates when the user closes
+            # the window (or when a fatal sink error occurs).
+            if self.server:
+                GLib.idle_add(self.server.shutdown)
+            else:
+                GLib.idle_add(self.stop)
         elif msg_type == Gst.MessageType.WARNING and self.debug_mode:
             warn, _ = message.parse_warning()
             print(f"⚠️  Local Display WARNING: {warn.message}")

@@ -247,9 +247,25 @@ wait_for_window_state_file() {
 main() {
   info "Integration test started (ts=$TS)"
   info "RTSP_URL=$RTSP_URL"
-  info "USE_INSTALLED=${USE_INSTALLED:-0}"
+  info "USE_INSTALLED=${USE_INSTALLED:-0} (overridden to 1 by this script)"
 
   need_cmd python3
+
+  # Always install into ~/.local/bin first, then test the installed files.
+  info "Installing via install.sh (testing installed files on PATH)"
+  set +e
+  bash "${ROOT_DIR}/install.sh" >>"$LOG_FILE" 2>&1
+  local install_rc=$?
+  set -e
+  if [[ "$install_rc" == "0" ]]; then
+    mark_pass "Install: install.sh"
+  else
+    mark_fail "Install: install.sh"
+    goto_summary=true
+  fi
+
+  # Force installed mode regardless of the caller's environment.
+  USE_INSTALLED=1
 
   local HDMI_USB_BIN HDMI_USB_PY HDMI_USB_SCREENSHOT
   HDMI_USB_BIN="$(resolve_bin hdmi-usb "${ROOT_DIR}/hdmi-usb")"
@@ -394,12 +410,15 @@ PY
       if [[ -z "$win_id2" ]]; then
         mark_fail "Window: restore (find preview window)"
       else
-        local g2
-        g2="$(window_geometry "$win_id2" || true)"
-        info "Window geometry after restart: ${g2:-<unknown>} (expected ~$saved_geometry)"
-        if [[ -n "$g2" && "$g2" == "$saved_geometry" ]]; then
+        # The restored geometry is applied after the local RTSP client reaches
+        # PLAYING. On some WMs, the initial geometry can briefly be the default
+        # before the saved state is applied, so wait for it.
+        if wait_for_window_geometry "$win_id2" "$saved_geometry"; then
           mark_pass "Window: restore saved geometry"
         else
+          local g2
+          g2="$(window_geometry "$win_id2" || true)"
+          info "Window geometry after restart: ${g2:-<unknown>} (expected ~$saved_geometry)"
           mark_fail "Window: restore saved geometry"
         fi
       fi

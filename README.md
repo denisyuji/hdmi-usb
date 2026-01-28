@@ -75,7 +75,7 @@ Use `--help` for more options.
 
 ### Single Screenshot Capture
 
-Capture a single PNG frame from the HDMI device or an active RTSP stream. On success, both scripts create two files and print:
+Capture a single PNG frame from the HDMI device or an active RTSP stream. On success, the scripts create two files and print:
 
 ```text
 OK
@@ -90,6 +90,18 @@ The base64-encoded image is saved to a file with the same name as the PNG but wi
 ```bash
 ./hdmi-usb-screenshot
 ./hdmi-usb-screenshot --output ~/Pictures
+
+# Low-res mode (no files written): print BASE64 to stdout
+./hdmi-usb-screenshot --lowres
+```
+
+In `--lowres` mode, the script prints:
+
+```text
+OK
+WIDTH=640
+HEIGHT=360
+BASE64=<base64-encoded PNG>
 ```
 
 #### From RTSP stream (`screenshot-rtsp.sh`)

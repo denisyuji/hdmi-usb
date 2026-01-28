@@ -1069,10 +1069,11 @@ class LocalDisplayPipeline:
         if not (videoconvert and videoscale and videosink):
             raise RuntimeError("Failed to create local video sink elements")
 
-        # If the user requested a fixed window width, try to make the sink
-        # negotiate to that size (16:9). This often results in the window
-        # being created at the desired size, which is more reliable than
-        # resizing after mapping on some window managers.
+        # Try to make the sink negotiate to a size that matches the intended window.
+        #
+        # This is significantly more reliable than relying purely on window manager
+        # resizing after mapping. Some setups effectively clamp the window width to
+        # the negotiated video width (you'll see height changes apply but width won't).
         if self.force_width:
             target_w = _round_even(max(int(self.force_width), 2))
             target_h = _compute_height_for_16_9(target_w)
@@ -1083,6 +1084,25 @@ class LocalDisplayPipeline:
                 )
                 capsfilter.set_property("caps", caps)
                 self.log(f"Negotiating local video size: {target_w}x{target_h} (16:9)")
+        elif self.restore_width and self.restore_height:
+            # When restoring a saved window size, negotiate video to that size as
+            # well, otherwise some sinks/WMs will refuse to shrink the window width.
+            try:
+                target_w = _round_even(max(int(self.restore_width), 2))
+                target_h = _round_even(max(int(self.restore_height), 2))
+                capsfilter = Gst.ElementFactory.make("capsfilter", "local_capsfilter")
+                if capsfilter:
+                    caps = Gst.Caps.from_string(
+                        f"video/x-raw,width={target_w},height={target_h}"
+                    )
+                    capsfilter.set_property("caps", caps)
+                    self.log(
+                        f"Negotiating local video size from saved geometry: "
+                        f"{target_w}x{target_h}"
+                    )
+            except Exception:
+                # Best-effort: if parsing fails, fall back to default negotiation.
+                capsfilter = None
 
         videosink.set_property("sync", False)
         # Allow arbitrary resizing; don't enforce original aspect ratio in caps negotiation.

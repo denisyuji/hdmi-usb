@@ -40,20 +40,24 @@ Use `--help` for more options.
 
 #### RTSP Streaming
 
-Stream HDMI capture over RTSP for remote viewing or recording. The server includes a local preview window by default.
+Stream HDMI capture over RTSP for remote viewing or recording using the unified server (`hdmi-usb.py`). The server includes a local preview window by default.
 
 ```bash
-# Start RTSP server with local display
-python3 rtsp-server.py
+# Start RTSP server with local display (default)
+python3 hdmi-usb.py
 
 # Start without local display window
-python3 rtsp-server.py --headless
+python3 hdmi-usb.py --headless
 
 # Stream audio only (requires AUDIO_FORCE_CARD environment variable)
-python3 rtsp-server.py --audio-only
+AUDIO_FORCE_CARD=1 python3 hdmi-usb.py --audio-only
+
+# Show app debug logs and/or GStreamer debug logs
+python3 hdmi-usb.py --debug
+python3 hdmi-usb.py --gst-debug
 ```
 
-**Default RTSP URL:** `rtsp://127.0.0.1:1234/hdmi`
+**Default RTSP URL:** `rtsp://127.0.0.1:1234/hdmi` (server listens on `0.0.0.0:1234`)
 
 **Connect with ffplay (recommended):**
 ```bash
@@ -95,6 +99,8 @@ The base64-encoded image is saved to a file with the same name as the PNG but wi
 ./screenshot-rtsp.sh --output ~/Pictures
 ./screenshot-rtsp.sh --url rtsp://192.168.1.100:1234/hdmi
 ```
+
+**Note:** `screenshot-rtsp.sh` is **video-only**. It rejects the RTSP audio stream before SETUP, so audio is not required (and is not negotiated) for image capture.
 
 Screenshots are saved as `screenshot_YYYYMMDD_HHMMSS.png`. Example usage:
 

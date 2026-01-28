@@ -6,6 +6,9 @@ set -euo pipefail
 # Debug mode flag
 DEBUG_MODE=false
 
+# Low-res mode flag: print BASE64 to stdout (no files written)
+LOWRES_MODE=false
+
 # Default RTSP URL (matches rtsp-server.py default)
 RTSP_URL="${RTSP_URL:-rtsp://127.0.0.1:1234/hdmi}"
 
@@ -34,6 +37,7 @@ rtsp_video_only() {
   # Usage:
   #   rtsp_video_only test
   #   rtsp_video_only capture "/tmp/frame_%05d.png"
+  #   rtsp_video_only lowres
   local mode="${1:-test}"
   local temp_pattern="${2:-}"
 
@@ -42,6 +46,7 @@ rtsp_video_only() {
     GST_DEBUG_NO_COLOR=1 "$PYTHON_BIN" - <<'PY'
 import os
 import sys
+import base64
 
 import gi
 gi.require_version("Gst", "1.0")
@@ -61,7 +66,7 @@ if not url:
     print("[ERR] RTSP_URL is empty", file=sys.stderr)
     sys.exit(2)
 
-if mode not in ("test", "capture"):
+if mode not in ("test", "capture", "lowres"):
     print(f"[ERR] Invalid MODE={mode!r}", file=sys.stderr)
     sys.exit(2)
 
@@ -141,6 +146,89 @@ if mode == "test":
 
     pipeline.set_state(Gst.State.PLAYING)
     GLib.timeout_add_seconds(5, lambda: (loop.quit(), False)[1])
+    loop.run()
+    pipeline.set_state(Gst.State.NULL)
+    sys.exit(0 if state["ok"] else 1)
+
+# mode == "lowres": capture a single 640x360 PNG to stdout as BASE64 (no files).
+if mode == "lowres":
+    queue = Gst.ElementFactory.make("queue", "queue")
+    decode = Gst.ElementFactory.make("decodebin", "decode")
+    videoconvert = Gst.ElementFactory.make("videoconvert", "videoconvert")
+    videoscale = Gst.ElementFactory.make("videoscale", "videoscale")
+    capsfilter = Gst.ElementFactory.make("capsfilter", "capsfilter")
+    pngenc = Gst.ElementFactory.make("pngenc", "pngenc")
+    sink = Gst.ElementFactory.make("appsink", "sink")
+
+    if not all([queue, decode, videoconvert, videoscale, capsfilter, pngenc, sink]):
+        print("[ERR] Failed to create lowres elements", file=sys.stderr)
+        sys.exit(2)
+
+    capsfilter.set_property("caps", Gst.Caps.from_string("video/x-raw,width=640,height=360"))
+    sink.set_property("emit-signals", True)
+    sink.set_property("sync", False)
+    sink.set_property("max-buffers", 1)
+    sink.set_property("drop", True)
+
+    for el in (queue, decode, videoconvert, videoscale, capsfilter, pngenc, sink):
+        pipeline.add(el)
+
+    if not queue.link(decode):
+        print("[ERR] Failed to link queue->decodebin", file=sys.stderr)
+        sys.exit(2)
+    if not videoconvert.link(videoscale):
+        print("[ERR] Failed to link videoconvert->videoscale", file=sys.stderr)
+        sys.exit(2)
+    if not videoscale.link(capsfilter):
+        print("[ERR] Failed to link videoscale->capsfilter", file=sys.stderr)
+        sys.exit(2)
+    if not capsfilter.link(pngenc) or not pngenc.link(sink):
+        print("[ERR] Failed to link capsfilter/pngenc/appsink", file=sys.stderr)
+        sys.exit(2)
+
+    def on_src_pad_added(_src, pad):
+        sink_pad = queue.get_static_pad("sink")
+        if sink_pad and not sink_pad.is_linked():
+            pad.link(sink_pad)
+
+    def on_decode_pad_added(_dec, pad):
+        caps = pad.get_current_caps() or pad.query_caps(None)
+        if not caps or caps.get_size() == 0:
+            return
+        s = caps.get_structure(0)
+        if not s.get_name().startswith("video/"):
+            return
+        sink_pad = videoconvert.get_static_pad("sink")
+        if sink_pad and not sink_pad.is_linked():
+            pad.link(sink_pad)
+
+    src.connect("pad-added", on_src_pad_added)
+    decode.connect("pad-added", on_decode_pad_added)
+
+    def on_new_sample(appsink):
+        sample = appsink.emit("pull-sample")
+        if not sample:
+            return Gst.FlowReturn.ERROR
+        buf = sample.get_buffer()
+        ok, mapinfo = buf.map(Gst.MapFlags.READ)
+        if not ok:
+            return Gst.FlowReturn.ERROR
+        try:
+            b64 = base64.b64encode(mapinfo.data).decode("ascii")
+        finally:
+            buf.unmap(mapinfo)
+        print("OK")
+        print("WIDTH=640")
+        print("HEIGHT=360")
+        print(f"BASE64={b64}")
+        state["ok"] = True
+        loop.quit()
+        return Gst.FlowReturn.OK
+
+    sink.connect("new-sample", on_new_sample)
+
+    pipeline.set_state(Gst.State.PLAYING)
+    GLib.timeout_add_seconds(max(2, capture_seconds), lambda: (loop.quit(), False)[1])
     loop.run()
     pipeline.set_state(Gst.State.NULL)
     sys.exit(0 if state["ok"] else 1)
@@ -241,6 +329,7 @@ USAGE:
 OPTIONS:
     -d, --debug          Enable debug mode (show GStreamer logs)
     -h, --help           Show this help message
+        --lowres         Output a 640x360 PNG screenshot as BASE64 to stdout (no files written)
     -o, --output DIR     Output directory for snapshot (default: current directory)
     -u, --url URL        RTSP URL (default: rtsp://127.0.0.1:1234/hdmi)
 
@@ -254,10 +343,16 @@ EXAMPLES:
     $0 --debug                            # Capture with debug output enabled
     $0 -o ~/Pictures                      # Capture to ~/Pictures directory
     $0 -u rtsp://192.168.1.100:8554/live  # Capture from custom RTSP URL
+    $0 --lowres                           # Print BASE64 screenshot to stdout (640x360)
     RTSP_URL=rtsp://server:8554/stream $0 # Using environment variable
 
 OUTPUT:
     Screenshots are saved as: screenshot_YYYYMMDD_HHMMSS.png
+    Low-res mode prints:
+      OK
+      WIDTH=640
+      HEIGHT=360
+      BASE64=<...>
 
 REQUIREMENTS:
     - GStreamer 1.0 with RTSP support (gstreamer1.0-plugins-good)
@@ -278,6 +373,10 @@ while [[ $# -gt 0 ]]; do
       show_help
       exit 0
       ;;
+    --lowres)
+      LOWRES_MODE=true
+      shift
+      ;;
     -o|--output)
       OUTPUT_DIR="$2"
       shift 2
@@ -294,10 +393,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Verify output directory exists or create it
-if [[ ! -d "$OUTPUT_DIR" ]]; then
-  log "Creating output directory: $OUTPUT_DIR"
-  mkdir -p "$OUTPUT_DIR"
+# Verify output directory exists or create it (file-writing mode only).
+if [[ "$LOWRES_MODE" != "true" ]]; then
+  if [[ ! -d "$OUTPUT_DIR" ]]; then
+    log "Creating output directory: $OUTPUT_DIR"
+    mkdir -p "$OUTPUT_DIR"
+  fi
 fi
 
 # Validate RTSP URL format
@@ -364,6 +465,22 @@ while true; do
   sleep "$CONNECT_DELAY_SECONDS"
 done
 log "RTSP connection successful"
+
+# --- Low-res BASE64 output mode ---------------------------------------------
+if [[ "$LOWRES_MODE" == "true" ]]; then
+  # Keep the retry knobs consistent with the regular mode. The Python snippet
+  # prints:
+  #   OK
+  #   WIDTH=640
+  #   HEIGHT=360
+  #   BASE64=<...>
+  RTSP_CAPTURE_SECONDS="${RTSP_CAPTURE_SECONDS:-5}"
+  set +e
+  rtsp_video_only lowres
+  LOWRES_RC=$?
+  set -e
+  exit "$LOWRES_RC"
+fi
 
 # --- Capture snapshot ------------------------------------------------------
 # Generate timestamp for filename

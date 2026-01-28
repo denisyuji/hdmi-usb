@@ -394,6 +394,30 @@ PY
     mark_skip "Screenshot: hdmi-usb-screenshot execution (server not ready)"
   fi
 
+  # --- Screenshot test: low-res BASE64 output (no files written) ---
+  if [[ "$goto_summary" != "true" ]]; then
+    info "Running screenshot tool against RTSP server (lowres BASE64)"
+    local lowres_out
+    set +e
+    lowres_out="$(timeout "$SCREENSHOT_TIMEOUT_SECONDS" "${HDMI_USB_SCREENSHOT}" --lowres -u "$RTSP_URL" 2>&1)"
+    local lowres_rc=$?
+    set -e
+    echo "$lowres_out" >>"$LOG_FILE"
+    if [[ "$lowres_rc" != "0" ]]; then
+      mark_fail "Lowres screenshot: hdmi-usb-screenshot --lowres execution"
+    else
+      local b64_line
+      b64_line="$(echo "$lowres_out" | sed -n 's/^BASE64=//p' | tail -1)"
+      if [[ -n "$b64_line" ]]; then
+        mark_pass "Lowres screenshot: BASE64 output present"
+      else
+        mark_fail "Lowres screenshot: BASE64 output present"
+      fi
+    fi
+  else
+    mark_skip "Lowres screenshot: hdmi-usb-screenshot --lowres execution (server not ready)"
+  fi
+
   # --- Restart server and verify restore (optional) ---
   if [[ -n "$saved_geometry" ]] && have_window_tools && [[ "$goto_summary" != "true" ]]; then
     info "Restarting server to validate window restore"

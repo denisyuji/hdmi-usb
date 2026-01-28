@@ -28,7 +28,7 @@ Unified HDMI USB RTSP server (and local preview).
 - **Audio**:
   - Attempts to match an ALSA capture card to the same USB device path as the video node.
   - Uses `arecord` to probe whether a capture device is available (prefers shareable `dsnoop`, falls back to `plughw`).
-  - Can be forced via `AUDIO_FORCE_CARD=<n>`; `--audio-only` mode requires a forced card.
+  - Can be forced via `AUDIO_FORCE_CARD=<n>` (best-effort).
 
 **CLI flags (see `--help`):**
 - `--headless`: disable local preview window

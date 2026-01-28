@@ -49,8 +49,8 @@ python3 hdmi-usb.py
 # Start without local display window
 python3 hdmi-usb.py --headless
 
-# Stream audio only (requires AUDIO_FORCE_CARD environment variable)
-AUDIO_FORCE_CARD=1 python3 hdmi-usb.py --audio-only
+# Optional: force audio from a specific ALSA card (best-effort)
+AUDIO_FORCE_CARD=1 python3 hdmi-usb.py
 
 # Show app debug logs and/or GStreamer debug logs
 python3 hdmi-usb.py --debug

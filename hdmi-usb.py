@@ -1537,7 +1537,6 @@ class RTSPServer(GstRtspServer.RTSPServer):
         *,
         video_device: Optional[str],
         audio_device_spec: Optional[str],
-        audio_only: bool,
         use_mjpeg: bool,
     ) -> str:
         """Build a gst-rtsp-server `set_launch()` pipeline string.
@@ -1577,11 +1576,6 @@ class RTSPServer(GstRtspServer.RTSPServer):
                 f'rtph264pay config-interval=1 pt=96 name=pay0'
             )
             return source + decoder + encoder
-
-        if audio_only:
-            if not audio_device_spec:
-                raise RuntimeError("Audio-only mode requires an audio device spec")
-            return _build_audio(audio_device_spec, "pay0")
 
         video_pipeline = _build_video()
         if audio_device_spec:
@@ -1662,7 +1656,7 @@ class RTSPServer(GstRtspServer.RTSPServer):
                 return spec
         return None
 
-    def __init__(self, audio_only=False, debug_mode=False, headless=False, viewer_width: Optional[int] = None):
+    def __init__(self, debug_mode=False, headless=False, viewer_width: Optional[int] = None):
         super().__init__()
         self.port = DEFAULT_RTSP_PORT
         self.endpoint = DEFAULT_RTSP_ENDPOINT
@@ -1684,7 +1678,7 @@ class RTSPServer(GstRtspServer.RTSPServer):
         video_device = detector.detect_video_device()
         audio_card = None
 
-        if not video_device and not audio_only:
+        if not video_device:
             raise RuntimeError(
                 "Could not find a MacroSilicon USB Video HDMI capture device"
             )
@@ -1703,13 +1697,9 @@ class RTSPServer(GstRtspServer.RTSPServer):
                     print(f"[{timestamp()}] ✅ Audio device available for streaming ({self.audio_device_spec})")
             else:
                 print(f"[{timestamp()}] ⚠️  No audio device found - video only")
-        elif audio_only:
-            raise RuntimeError(
-                "Audio-only mode requires manual audio card specification"
-            )
 
         # Determine if we need local display (as RTSP client)
-        use_local_display = not self.headless and video_device and not audio_only
+        use_local_display = not self.headless and video_device
         rtsp_url = f"rtsp://127.0.0.1:{self.port}{self.endpoint}"
 
         # Create and configure factory first (server must be ready before client connects)
@@ -1721,7 +1711,7 @@ class RTSPServer(GstRtspServer.RTSPServer):
             self.factory.set_reusable(True)
 
         use_mjpeg = False
-        if video_device and not audio_only:
+        if video_device:
             try:
                 # Check if the video device supports MJPEG format.
                 result = subprocess.run(
@@ -1737,7 +1727,6 @@ class RTSPServer(GstRtspServer.RTSPServer):
         launch = self._build_rtsp_launch_string(
             video_device=video_device,
             audio_device_spec=self.audio_device_spec if audio_card else None,
-            audio_only=audio_only,
             use_mjpeg=use_mjpeg,
         )
         self.factory.set_launch(launch)
@@ -1761,7 +1750,6 @@ class RTSPServer(GstRtspServer.RTSPServer):
 
         # Print server status
         mode_info = (
-            "AUDIO-ONLY 🎵" if audio_only else
             "VIDEO+AUDIO 🎥🎵" if audio_card else
             "VIDEO-ONLY 🎥"
         )
@@ -1866,7 +1854,6 @@ DESCRIPTION:
 EXAMPLES:
     %(prog)s                     # Stream with local display (default)
     %(prog)s --headless          # Stream without local display window
-    %(prog)s --audio-only        # Stream audio only (requires AUDIO_FORCE_CARD)
     %(prog)s --debug             # Enable debug output
     %(prog)s --reset-window      # Reset saved window position
     AUDIO_FORCE_CARD=1 %(prog)s  # Force specific audio card
@@ -1885,11 +1872,6 @@ COMPATIBILITY:
     ⚠️  Known issues: VLC may have compatibility issues with RTSP SETUP requests
                      (use ffplay or other RTSP clients instead)
     '''
-    )
-    parser.add_argument(
-        '--audio-only',
-        action='store_true',
-        help='Start RTSP server in audio-only mode'
     )
     parser.add_argument(
         '--headless',
@@ -1935,9 +1917,7 @@ COMPATIBILITY:
 
     server = None
     try:
-        if args.audio_only:
-            print("\033[92m🎵 Starting RTSP server in AUDIO-ONLY mode\033[0m")
-        elif args.headless:
+        if args.headless:
             print("\033[92m🎥🎵 Starting RTSP server in HEADLESS mode "
                   "(no local display)\033[0m")
         else:
@@ -1945,7 +1925,6 @@ COMPATIBILITY:
                   "and HDMI capture\033[0m")
 
         server = RTSPServer(
-            audio_only=args.audio_only,
             debug_mode=args.debug,
             headless=args.headless,
             viewer_width=args.width,
@@ -2006,8 +1985,8 @@ COMPATIBILITY:
         print("   • Make sure your HDMI capture device is connected")
         print("   • Check that v4l2-ctl is installed: "
               "sudo apt install v4l-utils")
-        print("   • For audio-only mode, set AUDIO_FORCE_CARD "
-              "environment variable")
+        print("   • For audio, set AUDIO_FORCE_CARD "
+              "environment variable (optional)")
         print("   • Run with --debug for more detailed information")
         print("   • If device is stuck, try unplugging and replugging the USB device")
         print("\n📺 CLIENT COMPATIBILITY:")

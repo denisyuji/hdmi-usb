@@ -56,6 +56,12 @@ def _compute_height_for_16_9(width: int) -> int:
     height = int(round(width * 9 / 16))
     return _round_even(max(height, 2))
 
+
+def _compute_width_for_16_9(height: int) -> int:
+    """Compute a 16:9 width for the given height."""
+    width = int(round(height * 16 / 9))
+    return _round_even(max(width, 2))
+
 def setup_gstreamer_debug():
     """Configure GStreamer logging.
 
@@ -580,6 +586,9 @@ class LocalDisplayPipeline:
         self._window_watch_window_id = None
         self._window_watch_last_geometry = None
         self._window_watch_ignore_until = 0.0
+        self._window_watch_last_w = None
+        self._window_watch_last_h = None
+        self._window_watch_adjusting_until = 0.0
         
         # Register cleanup function for robust cleanup
         register_cleanup(self.stop)
@@ -724,6 +733,24 @@ class LocalDisplayPipeline:
                 self.restore_height = match.group(2)
                 self.restore_x = match.group(3)
                 self.restore_y = match.group(4)
+
+                # Enforce 16:9 on restore.
+                #
+                # Choose the adjustment that produces the smaller change from the
+                # saved geometry: either keep width and adjust height, or keep
+                # height and adjust width.
+                try:
+                    w = int(self.restore_width)
+                    h = int(self.restore_height)
+                    h_from_w = _compute_height_for_16_9(w)
+                    w_from_h = _compute_width_for_16_9(h)
+
+                    if abs(h_from_w - h) <= abs(w_from_h - w):
+                        self.restore_height = str(h_from_w)
+                    else:
+                        self.restore_width = str(w_from_h)
+                except Exception:
+                    pass
                 
                 self.log(f"Will restore to: {self.restore_width}x{self.restore_height} "
                         f"at position {self.restore_x},{self.restore_y}")
@@ -1161,6 +1188,11 @@ class LocalDisplayPipeline:
             self.log("Window not found after waiting, position not restored")
             return False
 
+        # Keep the window watch (auto-save / 16:9 enforcement) pinned to the same
+        # window we just found for restore, to avoid mismatches when multiple
+        # candidate windows exist.
+        self._window_watch_window_id = window_id
+
         return self._apply_window_state_to_window(window_id)
 
     def apply_forced_window_size(self, width: int, height: int) -> bool:
@@ -1169,6 +1201,10 @@ class LocalDisplayPipeline:
         if not window_id:
             self.log("Window not found after waiting, forced size not applied")
             return False
+
+        # Keep the window watch pinned to this window so subsequent monitoring/
+        # enforcement operates on the same target.
+        self._window_watch_window_id = window_id
         applied = self._apply_window_size_to_window(window_id, width, height)
         # Always print the geometry we observe after the resize attempt.
         try:
@@ -1208,8 +1244,53 @@ class LocalDisplayPipeline:
                 if not geometry:
                     return True
 
+                # Enforce a 16:9 window geometry: whenever the window becomes
+                # non-16:9, snap it back by adjusting the opposite dimension.
+                #
+                # We choose which dimension "drives" based on what changed most
+                # since the last tick (width vs height).
+                if time.time() >= self._window_watch_ignore_until:
+                    m = re.match(r'^(\d+)x(\d+)([+-]\d+)([+-]\d+)$', geometry)
+                    if m:
+                        w = int(m.group(1))
+                        h = int(m.group(2))
+
+                        # If we're in the middle of an adjustment we initiated,
+                        # don't react to intermediate transient sizes.
+                        if time.time() >= self._window_watch_adjusting_until:
+                            # Determine if geometry is sufficiently close to 16:9.
+                            # Use a small tolerance to avoid thrashing due to WM rounding.
+                            off = abs((w * 9) - (h * 16))
+                            if off > (16 * 2):  # ~2px height error tolerance
+                                drive_width = True
+                                if self._window_watch_last_w is not None and self._window_watch_last_h is not None:
+                                    drive_width = abs(w - self._window_watch_last_w) >= abs(h - self._window_watch_last_h)
+
+                                if drive_width:
+                                    target_w = _round_even(w)
+                                    target_h = _compute_height_for_16_9(target_w)
+                                else:
+                                    target_h = _round_even(h)
+                                    target_w = _compute_width_for_16_9(target_h)
+
+                                if abs(target_w - w) >= 2 or abs(target_h - h) >= 2:
+                                    self.log(f"Enforcing 16:9 window geometry: {target_w}x{target_h} (from {w}x{h})")
+                                    # Avoid re-entrancy for a short window while WM applies changes.
+                                    self._window_watch_adjusting_until = time.time() + 2.0
+                                    self._apply_window_size_to_window(
+                                        self._window_watch_window_id,
+                                        target_w,
+                                        target_h,
+                                    )
+                                    # Re-sample on next tick after the WM applies.
+                                    return True
+
                 if geometry != self._window_watch_last_geometry:
                     self._window_watch_last_geometry = geometry
+                    m = re.match(r'^(\d+)x(\d+)([+-]\d+)([+-]\d+)$', geometry)
+                    if m:
+                        self._window_watch_last_w = int(m.group(1))
+                        self._window_watch_last_h = int(m.group(2))
 
                     # Do not write the transient initial geometry.
                     if time.time() < self._window_watch_ignore_until:

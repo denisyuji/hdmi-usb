@@ -56,6 +56,28 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || { err "Missing required command: $1"; return 1; }
 }
 
+resolve_bin() {
+  # Prefer installed binaries when USE_INSTALLED=1 is set.
+  #
+  # Usage:
+  #   resolve_bin hdmi-usb "$ROOT_DIR/hdmi-usb"
+  local name="$1"
+  local fallback="$2"
+
+  if [[ "${USE_INSTALLED:-0}" == "1" ]]; then
+    local p
+    p="$(command -v "$name" 2>/dev/null || true)"
+    if [[ -n "$p" ]]; then
+      echo "$p"
+      return 0
+    fi
+    err "USE_INSTALLED=1 but '$name' not found on PATH"
+    return 1
+  fi
+
+  echo "$fallback"
+}
+
 tcp_port_open() {
   local host="$1"
   local port="$2"
@@ -105,7 +127,7 @@ trap cleanup EXIT
 start_server_bg() {
   info "Starting server in background: hdmi-usb.py --debug"
   # Use -u so logs flush promptly to file.
-  python3 -u "${ROOT_DIR}/hdmi-usb.py" --debug >>"$LOG_FILE" 2>&1 &
+  python3 -u "${HDMI_USB_PY}" --debug >>"$LOG_FILE" 2>&1 &
   SERVER_PID="$!"
   info "Server pid=$SERVER_PID log=$LOG_FILE"
 }
@@ -113,7 +135,7 @@ start_server_bg() {
 start_server_bg_headless() {
   info "Starting server in background (headless): hdmi-usb.py --debug --headless"
   # Use -u so logs flush promptly to file.
-  python3 -u "${ROOT_DIR}/hdmi-usb.py" --debug --headless >>"$LOG_FILE" 2>&1 &
+  python3 -u "${HDMI_USB_PY}" --debug --headless >>"$LOG_FILE" 2>&1 &
   SERVER_PID="$!"
   info "Server pid=$SERVER_PID log=$LOG_FILE"
 }
@@ -225,8 +247,14 @@ wait_for_window_state_file() {
 main() {
   info "Integration test started (ts=$TS)"
   info "RTSP_URL=$RTSP_URL"
+  info "USE_INSTALLED=${USE_INSTALLED:-0}"
 
   need_cmd python3
+
+  local HDMI_USB_BIN HDMI_USB_PY HDMI_USB_SCREENSHOT
+  HDMI_USB_BIN="$(resolve_bin hdmi-usb "${ROOT_DIR}/hdmi-usb")"
+  HDMI_USB_PY="$(resolve_bin hdmi-usb.py "${ROOT_DIR}/hdmi-usb.py")"
+  HDMI_USB_SCREENSHOT="$(resolve_bin hdmi-usb-screenshot "${ROOT_DIR}/hdmi-usb-screenshot")"
 
   # Ensure GStreamer GI is importable early so failures are clear.
   if python3 - <<'PY' >/dev/null
@@ -251,7 +279,7 @@ PY
   info "Testing --reset-window (via wrapper): ${window_state_file_real}"
   echo "800x450+10+10" >"$window_state_file_real"
   set +e
-  "${ROOT_DIR}/hdmi-usb" --reset-window >>"$LOG_FILE" 2>&1
+  "${HDMI_USB_BIN}" --reset-window >>"$LOG_FILE" 2>&1
   local reset_rc=$?
   set -e
   if [[ "$reset_rc" == "0" && ! -f "$window_state_file_real" ]]; then
@@ -327,7 +355,7 @@ PY
     info "Running screenshot tool against RTSP server"
     local shot_out
     set +e
-    shot_out="$(timeout "$SCREENSHOT_TIMEOUT_SECONDS" "${ROOT_DIR}/hdmi-usb-screenshot" -o "$TEST_LOG_DIR" -u "$RTSP_URL" 2>&1)"
+    shot_out="$(timeout "$SCREENSHOT_TIMEOUT_SECONDS" "${HDMI_USB_SCREENSHOT}" -o "$TEST_LOG_DIR" -u "$RTSP_URL" 2>&1)"
     local shot_rc=$?
     set -e
     echo "$shot_out" >>"$LOG_FILE"
@@ -396,7 +424,7 @@ PY
 
     local headless_shot_out
     set +e
-    headless_shot_out="$(timeout "$SCREENSHOT_TIMEOUT_SECONDS" "${ROOT_DIR}/hdmi-usb-screenshot" -o "$TEST_LOG_DIR" -u "$RTSP_URL" 2>&1)"
+    headless_shot_out="$(timeout "$SCREENSHOT_TIMEOUT_SECONDS" "${HDMI_USB_SCREENSHOT}" -o "$TEST_LOG_DIR" -u "$RTSP_URL" 2>&1)"
     local headless_shot_rc=$?
     set -e
     echo "$headless_shot_out" >>"$LOG_FILE"

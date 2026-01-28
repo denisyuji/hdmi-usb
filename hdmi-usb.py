@@ -946,6 +946,42 @@ class LocalDisplayPipeline:
 
             self.log(f"Applying window geometry to {window_id}...")
 
+            def _geometry_matches(geometry: Optional[str]) -> bool:
+                if not geometry:
+                    return False
+                match = re.match(r'^(\d+)x(\d+)([+-]\d+)([+-]\d+)$', geometry)
+                if not match:
+                    return False
+                current_w = int(match.group(1))
+                current_h = int(match.group(2))
+                current_x = int(match.group(3))
+                current_y = int(match.group(4))
+                return (
+                    abs(current_x - apply_x) < 10 and
+                    abs(current_y - apply_y) < 10 and
+                    abs(current_w - target_w) < 10 and
+                    abs(current_h - target_h) < 10
+                )
+
+            # Fast path: apply once and poll briefly. This avoids a race where callers
+            # (e.g., integration tests) read window geometry immediately after PLAYING.
+            try:
+                _clear_wm_state()
+                _clear_size_hints()
+                _apply_geometry()
+                fast_deadline = time.monotonic() + 1.5
+                while time.monotonic() < fast_deadline:
+                    current_geometry = self.get_window_geometry(window_id)
+                    if _geometry_matches(current_geometry):
+                        self.log(
+                            f"Window geometry applied: {target_w}x{target_h} "
+                            f"at {apply_x},{apply_y} (current={current_geometry})"
+                        )
+                        return True
+                    time.sleep(0.05)
+            except Exception:
+                pass
+
             # Some window managers will re-apply maximize/tile state shortly
             # after mapping. Give it more time to settle.
             deadline = time.time() + 20.0
@@ -966,41 +1002,29 @@ class LocalDisplayPipeline:
                         text=True,
                         timeout=1
                     )
-                    time.sleep(0.25)
+                    time.sleep(0.10)
             except Exception:
                 pass
 
             while time.time() < deadline:
                 _clear_wm_state()
                 _clear_size_hints()
-                time.sleep(0.15)
+                time.sleep(0.05)
 
                 result = _apply_geometry()
                 if result.returncode != 0 and self.debug_mode:
                     self.log(f"wmctrl -e failed: {result.stderr.strip()}")
 
-                time.sleep(0.35)
+                time.sleep(0.15)
                 current_geometry = self.get_window_geometry(window_id)
                 if current_geometry:
                     last_geometry = current_geometry
-                    match = re.match(r'^(\d+)x(\d+)([+-]\d+)([+-]\d+)$', current_geometry)
-                    if match:
-                        current_w = int(match.group(1))
-                        current_h = int(match.group(2))
-                        current_x = int(match.group(3))
-                        current_y = int(match.group(4))
-
-                        if (abs(current_x - apply_x) < 10 and
-                            abs(current_y - apply_y) < 10 and
-                            abs(current_w - target_w) < 10 and
-                            abs(current_h - target_h) < 10):
-                            self.log(
-                                f"Window geometry applied: {target_w}x{target_h} "
-                                f"at {apply_x},{apply_y} (current={current_geometry})"
-                            )
-                            return True
-
-                time.sleep(0.25)
+                    if _geometry_matches(current_geometry):
+                        self.log(
+                            f"Window geometry applied: {target_w}x{target_h} "
+                            f"at {apply_x},{apply_y} (current={current_geometry})"
+                        )
+                        return True
 
             if last_geometry:
                 self.log(
@@ -1105,31 +1129,54 @@ class LocalDisplayPipeline:
 
             self.log(f"Applying forced window size to {window_id}...")
 
+            def _size_matches(geometry: Optional[str]) -> bool:
+                if not geometry:
+                    return False
+                match = re.match(r'^(\d+)x(\d+)([+-]\d+)([+-]\d+)$', geometry)
+                if not match:
+                    return False
+                current_w = int(match.group(1))
+                current_h = int(match.group(2))
+                return abs(current_w - target_w) < 10 and abs(current_h - target_h) < 10
+
+            # Fast path: apply once and poll briefly.
+            try:
+                _clear_wm_state()
+                _clear_size_hints()
+                _apply_geometry()
+                fast_deadline = time.monotonic() + 1.5
+                while time.monotonic() < fast_deadline:
+                    current_geometry = self.get_window_geometry(window_id)
+                    if _size_matches(current_geometry):
+                        self.log(
+                            f"Forced window size applied: {target_w}x{target_h} "
+                            f"(current={current_geometry})"
+                        )
+                        print(f"[{timestamp()}] 🪟 Local window geometry: {current_geometry}")
+                        return True
+                    time.sleep(0.05)
+            except Exception:
+                pass
+
             deadline = time.time() + 20.0
             last_geometry = None
             while time.time() < deadline:
                 _clear_wm_state()
                 _clear_size_hints()
-                time.sleep(0.15)
+                time.sleep(0.05)
 
                 result = _apply_geometry()
                 if result.returncode != 0 and self.debug_mode:
                     self.log(f"wmctrl -e failed: {result.stderr.strip()}")
 
-                time.sleep(0.35)
+                time.sleep(0.15)
                 current_geometry = self.get_window_geometry(window_id)
                 if current_geometry:
                     last_geometry = current_geometry
-                    match = re.match(r'^(\d+)x(\d+)([+-]\d+)([+-]\d+)$', current_geometry)
-                    if match:
-                        current_w = int(match.group(1))
-                        current_h = int(match.group(2))
-                        if abs(current_w - target_w) < 10 and abs(current_h - target_h) < 10:
-                            self.log(f"Forced window size applied: {target_w}x{target_h} (current={current_geometry})")
-                            print(f"[{timestamp()}] 🪟 Local window geometry: {current_geometry}")
-                            return True
-
-                time.sleep(0.25)
+                    if _size_matches(current_geometry):
+                        self.log(f"Forced window size applied: {target_w}x{target_h} (current={current_geometry})")
+                        print(f"[{timestamp()}] 🪟 Local window geometry: {current_geometry}")
+                        return True
 
             if last_geometry:
                 self.log(f"Forced window size did not settle; last seen: {last_geometry}")

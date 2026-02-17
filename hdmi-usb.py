@@ -126,6 +126,13 @@ atexit.register(cleanup_all)
 # Utility Functions
 # =============================================================================
 
+def get_window_state_path() -> Path:
+    """Return a fixed path for saving/loading window geometry (independent of cwd).
+    Uses XDG config directory so the file is always in the same place."""
+    xdg = os.environ.get('XDG_CONFIG_HOME') or str(Path.home() / '.config')
+    return Path(xdg) / 'hdmi-usb' / 'window-state'
+
+
 def timestamp() -> str:
     """Return current timestamp in standard format."""
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -570,8 +577,8 @@ class LocalDisplayPipeline:
         self.owner_pid = os.getpid()
         self.force_width = force_width
         
-        # Window state management
-        self.window_state_file = Path.home() / '.hdmi-rtsp-unified-window-state'
+        # Window state management (fixed path so it works when started from any cwd)
+        self.window_state_file = get_window_state_path()
         self.restore_x = None
         self.restore_y = None
         self.restore_width = None
@@ -725,12 +732,22 @@ class LocalDisplayPipeline:
         if self.force_width:
             self.log("Ignoring saved window state due to --width override")
             return
-        if not self.window_state_file.exists():
-            self.log("No saved window state found")
-            return
-        
+        path = self.window_state_file
+        if not path.exists():
+            # One-time migration from legacy path
+            legacy = Path.home() / '.hdmi-rtsp-unified-window-state'
+            if legacy.exists():
+                try:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(legacy.read_text())
+                    legacy.unlink()
+                except OSError:
+                    path = legacy
+            else:
+                self.log("No saved window state found")
+                return
         try:
-            geometry = self.window_state_file.read_text().strip()
+            geometry = path.read_text().strip()
             self.log(f"Restoring window state: {geometry}")
             
             # Parse geometry (format: WIDTHxHEIGHT+X+Y)
@@ -1350,8 +1367,12 @@ class LocalDisplayPipeline:
                     if time.time() < self._window_watch_ignore_until:
                         return True
 
-                    self.window_state_file.write_text(geometry)
-                    self.log(f"Window geometry saved: {geometry}")
+                    try:
+                        self.window_state_file.parent.mkdir(parents=True, exist_ok=True)
+                        self.window_state_file.write_text(geometry)
+                        self.log(f"Window geometry saved: {geometry}")
+                    except OSError as e:
+                        self.log(f"Could not save window state: {e}")
             except Exception as e:
                 # Best-effort; don't crash the pipeline for window tooling issues.
                 self.log(f"Window save error: {e}")
@@ -1615,20 +1636,17 @@ class RTSPServer(GstRtspServer.RTSPServer):
             return
 
     def _on_media_bus_message(self, _bus, message) -> bool:
-        """Monitor bus messages for errors and warnings."""
+        """Monitor bus messages for errors and warnings. Any pipeline error
+        terminates the application."""
         msg_type = message.type
 
         if msg_type == Gst.MessageType.ERROR:
             err, debug_info = message.parse_error()
             error_msg = err.message
-            print(f"❌ GStreamer Pipeline ERROR: {error_msg}")
-            if self.debug_mode:
-                print(f"   Debug: {debug_info}")
-
-            # Report critical errors to server
-            critical_keywords = ("resource busy", "failed to", "cannot")
-            if any(kw in error_msg.lower() for kw in critical_keywords):
-                self.on_pipeline_error(error_msg)
+            if debug_info:
+                error_msg = f"{error_msg} ({debug_info})"
+            print(f"❌ GStreamer video capture pipeline ERROR: {error_msg}")
+            self.on_pipeline_error(error_msg)
 
         elif msg_type == Gst.MessageType.WARNING and self.debug_mode:
             warn, _ = message.parse_warning()
@@ -1796,11 +1814,10 @@ class RTSPServer(GstRtspServer.RTSPServer):
         print(f"[{timestamp()}] ❌ Client disconnected: {ip}")
 
     def on_pipeline_error(self, error_msg: str):
-        """Handle pipeline errors by shutting down the server."""
+        """Handle video capture pipeline errors by terminating the application."""
         self.pipeline_errors += 1
-        print(f"❌ Pipeline Error #{self.pipeline_errors}: {error_msg}")
-        print(f"[{timestamp()}] 💥 Critical pipeline failure - "
-              f"shutting down server")
+        print(f"❌ Video capture pipeline error: {error_msg}")
+        print(f"[{timestamp()}] 💥 Shutting down due to pipeline failure")
 
         if self.main_loop:
             GLib.idle_add(self.main_loop.quit)
@@ -1910,7 +1927,7 @@ COMPATIBILITY:
     
     # Handle reset-window option
     if args.reset_window:
-        window_state_file = Path.home() / '.hdmi-rtsp-unified-window-state'
+        window_state_file = get_window_state_path()
         if window_state_file.exists():
             window_state_file.unlink()
             print("[INFO] Window state reset. Next launch will use default position.")
@@ -1980,10 +1997,10 @@ COMPATIBILITY:
         # Clean up on exit
         server.shutdown()
 
-        # Check if we exited due to pipeline errors
+        # Check if we exited due to video capture pipeline errors
         if server.pipeline_errors > 0:
-            print(f"\n❌ Server terminated due to {server.pipeline_errors} "
-                  f"pipeline error(s)")
+            print(f"\n❌ Application terminated: video capture pipeline error(s) "
+                  f"({server.pipeline_errors})")
             exit(1)
 
     except RuntimeError as e:

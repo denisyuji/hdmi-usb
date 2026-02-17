@@ -35,7 +35,7 @@ Unified HDMI USB RTSP server (and local preview).
 - `--width <px>`: force local viewer window width (16:9)
 - `--debug`: enable app logs (`[INFO]`, `[LOCAL]`, etc.)
 - `--gst-debug`: enable GStreamer logs (very verbose)
-- `--reset-window`: clear saved window geometry (`~/.hdmi-rtsp-unified-window-state`)
+- `--reset-window`: clear saved window geometry (XDG: `~/.config/hdmi-usb/window-state`)
 
 ### hdmi-usb (wrapper)
 Launcher script that:
@@ -56,13 +56,14 @@ Snapshot tool for RTSP:
 **Important behavior:** it is **video-only** and explicitly rejects the RTSP audio stream **before SETUP** using `rtspsrc`’s `select-stream` signal.
 
 ### install.sh
-- **System Installation**: Copies scripts to `~/.local/bin/` (`hdmi-usb.py`, `hdmi-usb`)
+- **System Installation**: Copies scripts to `~/.local/bin/` (`hdmi-usb.py`, `hdmi-usb`, `hdmi-usb-screenshot`)
 - **PATH Management**: Automatically adds `~/.local/bin` to shell PATH
 - **Shell Detection**: Supports bash, zsh, fish, and other shells
 
 ## Technical Details
 
-- **Window state**: saved to `~/.hdmi-rtsp-unified-window-state` as `WIDTHxHEIGHT+X+Y`
+- **Window state**: saved to `${XDG_CONFIG_HOME:-~/.config}/hdmi-usb/window-state` as `WIDTHxHEIGHT+X+Y`
+  - Legacy path (migrated automatically): `~/.hdmi-rtsp-unified-window-state`
 - **Window tooling**: uses `wmctrl`, `xwininfo`, and `xprop` (best-effort; missing tools shouldn’t crash the server)
 - **RTSP multi-client robustness**: static server pipeline avoids per-client capture opens
 - **Audio matching**: prefers ALSA card on same USB path as the video device
@@ -79,16 +80,8 @@ Snapshot tool for RTSP:
 
 ## Commit Message Guidelines
 
-When making commits to this project, please generate commit messages that adhere to the Linux project commit guidelines with the following requirements:
-
-- The commit title must be in the format 'subject: description'.
-- The entire title (subject line) must be no more than 50 characters.
-- Use the imperative mood in the title.
-- Leave a blank line after the title.
-- Format the commit description body with lines no more than 50 characters.
-- Use clear and concise language that summarizes what was changed and why.
-- Use bullet points in the message body to list multiple changes or details.
-- Important: Do NOT wrap the message with triple backticks at the beginning or end. Use markdown formatting when necessary within the message body, but do NOT enclose the entire message in markdown code fences.
+- Title format: `subject: description` (imperative, ≤50 chars).
+- Blank line after title; keep body concise and wrapped ~50 chars.
 
 ## Commit Behavior Guidelines
 
@@ -100,3 +93,16 @@ When making commits to this project, please generate commit messages that adhere
 - **Prefer `--debug` (and `--gst-debug` when needed)**: start with app logs, enable GStreamer logs only when diagnosing pipeline issues.
 - **Default mode is quiet**: without `--debug`/`--gst-debug`, the wrapper runs the server silently unless there are errors.
 - **Window state management**: Use `--reset-window` to clear saved window position/size if needed.
+
+## Integration Test Coverage
+
+`integration-test.sh` covers the core end-to-end flows:
+- install + PATH usage (`~/.local/bin`)
+- RTSP server starts/listens
+- local preview window save/restore (when X11 tooling exists)
+- screenshot tool (normal + `--lowres`)
+- headless mode
+
+It does not attempt to force/fake hardware failure states, so it does not
+exercise wrapper recovery paths, audio card matching, or instance-kill
+behavior.

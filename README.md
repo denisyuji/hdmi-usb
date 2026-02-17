@@ -4,13 +4,13 @@ Scripts to detect and preview using cheap USB HDMI capture devices using GStream
 
 **AI Agent Integration**: The screenshot scripts enable AI agents to "see" the HDMI input by capturing frames as PNG and base64 files. This allows agents to verify that external devices connected to the capture card are providing the expected HDMI output.
 
-![Tested on a cheap hdmi capture card](cheap-hdmi-usb.webp)
+![Tested on a cheap HDMI capture card](cheap-hdmi-usb.webp)
 
 ## Features
 
 - **Auto-detection** of MacroSilicon USB Video devices
 - **Audio support** - automatically detects and uses audio from capture device
-- **Local display window** - live preview with automatic video sharing
+- **Local display window** - live preview
 - **RTSP streaming** - scripts to show live video capture on the screen of the local machine and/or to stream live video/audio over network
 - **Snapshot capture** - take single frame screenshots from RTSP stream
 - **Window state** - automatically saves and restores window position
@@ -75,7 +75,7 @@ Use `--help` for more options.
 
 ### Single Screenshot Capture
 
-Capture a single PNG frame from the HDMI device or an active RTSP stream. On success, the scripts create two files and print:
+Capture a single PNG frame from an active RTSP stream. On success, the script creates two files and prints:
 
 ```text
 OK
@@ -85,7 +85,9 @@ BASE64_FILE=<absolute path to the base64-encoded image file>
 
 The base64-encoded image is saved to a file with the same name as the PNG but with a `.base64` extension (e.g., `screenshot_20240101_120000.base64`).
 
-#### From HDMI capture device (`hdmi-usb-screenshot`)
+#### From RTSP stream (`hdmi-usb-screenshot`)
+
+Start the server first (for example, `./hdmi-usb --debug` or `python3 hdmi-usb.py`), then run:
 
 ```bash
 ./hdmi-usb-screenshot
@@ -105,30 +107,6 @@ HEIGHT=360
 BASE64=<base64-encoded PNG>
 ```
 
-#### From RTSP stream (`screenshot-rtsp.sh`)
-
-```bash
-./screenshot-rtsp.sh
-./screenshot-rtsp.sh --output ~/Pictures
-./screenshot-rtsp.sh --url rtsp://192.168.1.100:1234/hdmi
-```
-
-**Note:** `screenshot-rtsp.sh` is **video-only**. It rejects the RTSP audio stream before SETUP, so audio is not required (and is not negotiated) for image capture.
-
-Screenshots are saved as `screenshot_YYYYMMDD_HHMMSS.png`. Example usage:
-
-```bash
-# Capture and open in image viewer
-eval "$(./screenshot-rtsp.sh)"
-feh "$FILENAME"
-
-# Decode base64 file back to image
-base64 -d "$BASE64_FILE" > decoded_image.png
-
-# Capture multiple snapshots
-for i in {1..5}; do ./screenshot-rtsp.sh --output ~/captures; sleep 2; done
-```
-
 Use `--help` on each script for more options.
 
 ## Installation
@@ -142,7 +120,7 @@ sudo apt update
 sudo apt install gstreamer1.0-tools gstreamer1.0-plugins-base \
   gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
   gstreamer1.0-plugins-ugly gstreamer1.0-libav v4l-utils wmctrl \
-  python3 gir1.2-gst-rtsp-server-1.0 python3-gi
+  xwininfo xprop alsa-utils python3 gir1.2-gst-rtsp-server-1.0 python3-gi
 
 # Optional: Install ffplay for RTSP client testing
 sudo apt install ffmpeg
@@ -150,6 +128,28 @@ sudo apt install ffmpeg
 
 **Note:** The scripts use only Python standard library modules and require no PyPI packages.
 
+## Testing
+
+`integration-test.sh` is a best-effort integration test that installs the scripts into `~/.local/bin`, then exercises the most important user-facing flows.
+
+**Covered:**
+- Installation via `install.sh`
+- Python GI imports for GStreamer / RTSP server
+- `--reset-window` behavior (clears saved window state)
+- RTSP server starts and listens on `127.0.0.1:1234`
+- Local preview window move/resize and window state save/restore (requires X11 + `wmctrl` + `xwininfo`)
+- `hdmi-usb-screenshot` works against the running RTSP server (normal + `--lowres`)
+- Headless mode (`--headless`) + screenshot
+
+**Not covered (by design):**
+- Wrapper preflight/recovery (`hdmi-usb` USB reset / `uvcvideo` reload paths)
+- Audio device matching and ALSA sharing (`dsnoop`/`plughw`)
+- Instance-kill behavior and orphan process cleanup
+- `--gst-debug` log behavior
+- `--width` forced local viewer sizing (window managers vary; can be flaky to assert)
+
 ## Window State
 
 Window position and size are automatically saved and restored between sessions. Use `--reset-window` to clear saved state.
+
+Window state is stored at `${XDG_CONFIG_HOME:-~/.config}/hdmi-usb/window-state` (legacy installs may have `~/.hdmi-rtsp-unified-window-state`, which is migrated automatically).

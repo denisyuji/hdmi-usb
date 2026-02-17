@@ -30,7 +30,7 @@ if ! echo ":$PATH:" | grep -q ":$HOME/.local/bin:"; then
   echo "[INFO] Adding ~/.local/bin to PATH in $SHELL_RC"
   {
     echo ""
-    echo "# Added by AppImage installer on $(date)"
+    echo "# Added by hdmi-usb installer on $(date)"
     if [[ "$SHELL_NAME" == "fish" ]]; then
       echo "set -U fish_user_paths \$HOME/.local/bin \$fish_user_paths"
     else

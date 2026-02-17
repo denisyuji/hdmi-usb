@@ -29,7 +29,10 @@ WINDOW_TIMEOUT_SECONDS="${WINDOW_TIMEOUT_SECONDS:-20}"
 SCREENSHOT_TIMEOUT_SECONDS="${SCREENSHOT_TIMEOUT_SECONDS:-30}"
 
 # Window state file used by hdmi-usb.py
-WINDOW_STATE_FILE="${WINDOW_STATE_FILE:-$HOME/.hdmi-rtsp-unified-window-state}"
+# New location (XDG): ${XDG_CONFIG_HOME:-$HOME/.config}/hdmi-usb/window-state
+XDG_CONFIG_HOME_REAL="${XDG_CONFIG_HOME:-$HOME/.config}"
+WINDOW_STATE_FILE_DEFAULT="${XDG_CONFIG_HOME_REAL}/hdmi-usb/window-state"
+WINDOW_STATE_FILE="${WINDOW_STATE_FILE:-$WINDOW_STATE_FILE_DEFAULT}"
 
 info() { echo "[INFO] $*" | tee -a "$LOG_FILE" >&2; }
 warn() { echo "[WARN] $*" | tee -a "$LOG_FILE" >&2; }
@@ -291,14 +294,18 @@ PY
   # `hdmi-usb.py --reset-window` clears this file and exits. Validate it via the
   # wrapper script (`hdmi-usb`) too, since it has special-casing to skip device
   # preflight for print-and-exit flags.
-  local window_state_file_real="$HOME/.hdmi-rtsp-unified-window-state"
+  local window_state_file_real="$WINDOW_STATE_FILE"
+  local window_state_file_legacy="$HOME/.hdmi-rtsp-unified-window-state"
   info "Testing --reset-window (via wrapper): ${window_state_file_real}"
   echo "800x450+10+10" >"$window_state_file_real"
+  # Legacy location: ensure --reset-window clears this too (otherwise the
+  # next run may migrate it back into the XDG location).
+  echo "800x450+10+10" >"$window_state_file_legacy"
   set +e
   "${HDMI_USB_BIN}" --reset-window >>"$LOG_FILE" 2>&1
   local reset_rc=$?
   set -e
-  if [[ "$reset_rc" == "0" && ! -f "$window_state_file_real" ]]; then
+  if [[ "$reset_rc" == "0" && ! -f "$window_state_file_real" && ! -f "$window_state_file_legacy" ]]; then
     mark_pass "Reset-window: clears saved window state"
   else
     mark_fail "Reset-window: clears saved window state"

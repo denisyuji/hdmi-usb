@@ -1927,10 +1927,25 @@ COMPATIBILITY:
     
     # Handle reset-window option
     if args.reset_window:
+        # Clear both the current XDG path and the legacy dotfile so a "reset"
+        # doesn't get undone by the legacy-to-XDG migration on next launch.
         window_state_file = get_window_state_path()
-        if window_state_file.exists():
-            window_state_file.unlink()
+        legacy_window_state_file = Path.home() / '.hdmi-rtsp-unified-window-state'
+
+        cleared_paths = []
+        for path in (window_state_file, legacy_window_state_file):
+            try:
+                if path.exists():
+                    path.unlink()
+                    cleared_paths.append(str(path))
+            except OSError:
+                # Best-effort; if we can't delete it, still continue.
+                pass
+
+        if cleared_paths:
             print("[INFO] Window state reset. Next launch will use default position.")
+            if args.debug:
+                print(f"[INFO] Cleared: {', '.join(cleared_paths)}")
         else:
             print("[INFO] No saved window state found.")
         return 0

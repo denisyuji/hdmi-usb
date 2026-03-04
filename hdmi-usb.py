@@ -30,6 +30,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+# Ensure log output is line-buffered even when stdout/stderr are piped
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    # Best-effort; fall back to default buffering on failure
+    pass
+
 gi.require_version('Gst', '1.0')
 gi.require_version('GstRtspServer', '1.0')
 from gi.repository import Gst, GstRtspServer, GLib, GObject

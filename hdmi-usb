@@ -102,7 +102,7 @@ done
 # Run the Python script
 if [ "$DEBUG_MODE" = true ]; then
     # Debug mode: show all output
-    "${SCRIPT_DIR}/hdmi-usb.py" "${FORWARD_ARGS[@]}" &
+    "${SCRIPT_DIR}/hdmi-usb.py" "${FORWARD_ARGS[@]}"
 else
     # Silent mode: redirect output to /dev/null
     "${SCRIPT_DIR}/hdmi-usb.py" "${FORWARD_ARGS[@]}" >/dev/null 2>&1 &

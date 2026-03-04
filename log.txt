@@ -1,0 +1,30 @@
+[92m🎥🎵 Starting unified RTSP server with local display and HDMI capture[0m
+[INFO] USB path for video device: 3-8.3.1
+[INFO] Matched ALSA card by USB path: card 1
+[INFO] Audio card 1 ID: MS2109
+[INFO] Verified: Audio card 1 (MS2109) is a USB device with capture capability
+[INFO] Audio verification passed - audio is from the USB HDMI capture device
+[2026-03-04 10:18:10] ✅ Found video device: /dev/video4
+[2026-03-04 10:18:10] ✅ Found audio card: 1
+[2026-03-04 10:18:11] ✅ Audio device available for streaming (dsnoop:CARD=1,DEV=0)
+[2026-03-04 10:18:11] 🚀 RTSP server is running at rtsp://0.0.0.0:1234/hdmi
+[2026-03-04 10:18:11] 📡 Streaming mode: VIDEO+AUDIO 🎥🎵
+[2026-03-04 10:18:11] 🖥️  Waiting for RTSP server to be ready...
+[2026-03-04 10:18:14] 🖥️  Starting local display as RTSP client...
+[LOCAL] Restoring window state: 702x394-24+32
+[LOCAL] Will restore to: 702x394 at position -24,+32
+[LOCAL] Building RTSP client pipeline for: rtsp://127.0.0.1:1234/hdmi
+[LOCAL] Using local videosink: glimagesink
+⚠️  WARNING: Pipeline state change timed out, but continuing...
+[LOCAL] Pipeline may still be initializing in background
+[LOCAL] Local display pipeline started successfully
+[2026-03-04 10:18:17] 🖥️  Local display connected as RTSP client
+[2026-03-04 10:18:17] 🎬 HDMI capture RTSP server ready for connections
+[2026-03-04 10:18:17] 📡 Client connected from 127.0.0.1
+[LOCAL] State changed: null -> ready
+[LOCAL] State changed: ready -> paused
+[LOCAL] State changed: paused -> playing
+[LOCAL] Applying saved window geometry after PLAYING: 702x394-24+32
+[LOCAL] Found window ID by PID 1176389: 0x05800002
+[LOCAL] Applying window geometry to 0x05800002...
+[LOCAL] Window geometry applied: 702x394 at 0,32 (current=702x394+0+32)

@@ -4,9 +4,9 @@
 
 This project provides automated HDMI capture device detection and streaming for cheap MacroSilicon USB HDMI capture devices.
 
-The current codebase centers around a single unified Python RTSP server (`hdmi-usb.py`) plus small shell helpers:
+The current codebase centers around a single unified Python RTSP server (`hdmi-usb.py`) plus helpers:
 - A wrapper launcher (`hdmi-usb`) that can do device preflight/recovery and run the server in the background.
-- A snapshot tool (`hdmi-usb-screenshot`) that captures a PNG (and base64) from the RTSP stream.
+- An MCP-only helper (`hdmi-usb-screenshot-mcp`, Python 3 + GStreamer GI) that exposes the RTSP video frame over **MCP stdio** (`get_last_frame`).
 
 ## Key Components
 
@@ -43,20 +43,18 @@ Launcher script that:
 - Translates wrapper-only `-d` into `hdmi-usb.py --debug`.
 - Runs `hdmi-usb.py` in the background. If neither `--debug` nor `--gst-debug` is set, it runs silently (`>/dev/null`).
 
-### hdmi-usb-screenshot
-Snapshot tool for RTSP:
-- Captures a frame from an RTSP stream to `screenshot_YYYYMMDD_HHMMSS.png`
-- Writes a matching `.base64` file
-- `--lowres` saves a 640x360 PNG and prints `BASE64=...`
-- Prints:
-  - `OK`
-  - `FILENAME=...`
-  - `BASE64_FILE=...`
+### hdmi-usb-screenshot-mcp
+**MCP-only** RTSP client (default URL `rtsp://127.0.0.1:1234/hdmi`, overridable via `RTSP_URL` / `--url`):
 
-**Important behavior:** it is **video-only** and explicitly rejects the RTSP audio stream **before SETUP** using `rtspsrc`’s `select-stream` signal.
+- **Stdio**: JSON-RPC 2.0 with `Content-Length` framing on stdin/stdout.
+- **Pipeline**: after TCP + RTSP preflight, a background thread runs continuous **640×360 PNG** capture; **`get_last_frame`** returns the latest frame as MCP `image` content (base64). **Stderr** only for logs/errors.
+
+**Video-only:** rejects the RTSP audio stream **before SETUP** via `rtspsrc`’s `select-stream` signal.
+
+**Automated check:** `test_hdmi_usb_screenshot_mcp.py` spawns the binary and validates handshake + PNG from `get_last_frame` (RTSP must already be running).
 
 ### install.sh
-- **System Installation**: Copies scripts to `~/.local/bin/` (`hdmi-usb.py`, `hdmi-usb`, `hdmi-usb-screenshot`)
+- **System Installation**: Copies scripts to `~/.local/bin/` (`hdmi-usb.py`, `hdmi-usb`, `hdmi-usb-screenshot-mcp`)
 - **PATH Management**: Automatically adds `~/.local/bin` to shell PATH
 - **Shell Detection**: Supports bash, zsh, fish, and other shells
 
@@ -100,8 +98,10 @@ Snapshot tool for RTSP:
 - install + PATH usage (`~/.local/bin`)
 - RTSP server starts/listens
 - local preview window save/restore (when X11 tooling exists)
-- screenshot tool (normal + `--lowres`)
-- headless mode
+- `test_hdmi_usb_screenshot_mcp.py` (MCP stdio against running RTSP)
+- headless RTSP + same MCP test
+
+`test_hdmi_usb_screenshot_mcp.py` is also the focused unit for MCP; it does not start `hdmi-usb.py` itself.
 
 It does not attempt to force/fake hardware failure states, so it does not
 exercise wrapper recovery paths, audio card matching, or instance-kill

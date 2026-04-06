@@ -2,7 +2,7 @@
 
 Scripts to detect and preview using cheap USB HDMI capture devices using GStreamer. Tested with MacroSilicon-based devices. You can either run a **live preview** locally on the machine connected to the capture device over USB, or run an **RTSP server** to stream the capture over the network (optionally with a local preview).
 
-**AI Agent Integration**: The screenshot scripts enable AI agents to "see" the HDMI input by capturing frames as PNG and base64 files. This allows agents to verify that external devices connected to the capture card are providing the expected HDMI output.
+**AI Agent Integration**: The **`hdmi-usb-screenshot-mcp`** helper runs an **[MCP](https://modelcontextprotocol.io/) server** on stdio while the RTSP stream is up; agents call **`get_last_frame`** to receive the latest HDMI frame as a 640×360 PNG (base64).
 
 ![Tested on a cheap HDMI capture card](cheap-hdmi-usb.webp)
 
@@ -12,7 +12,7 @@ Scripts to detect and preview using cheap USB HDMI capture devices using GStream
 - **Audio support** - automatically detects and uses audio from capture device
 - **Local display window** - live preview
 - **RTSP streaming** - scripts to show live video capture on the screen of the local machine and/or to stream live video/audio over network
-- **Snapshot capture** - take single frame screenshots from RTSP stream
+- **MCP frame grabber** - `hdmi-usb-screenshot-mcp` exposes the live RTSP frame over MCP stdio
 - **Window state** - automatically saves and restores window position
 
 ## Usage
@@ -73,41 +73,31 @@ gst-launch-1.0 rtspsrc location=rtsp://127.0.0.1:1234/hdmi ! decodebin ! autovid
 
 Use `--help` for more options.
 
-### Single Screenshot Capture
+### MCP frame server (`hdmi-usb-screenshot-mcp`)
 
-Capture a single PNG frame from an active RTSP stream. On success, the script creates two files and prints:
-
-```text
-OK
-FILENAME=<absolute path to the PNG file>
-BASE64_FILE=<absolute path to the base64-encoded image file>
-```
-
-The base64-encoded image is saved to a file with the same name as the PNG but with a `.base64` extension (e.g., `screenshot_20240101_120000.base64`).
-
-#### From RTSP stream (`hdmi-usb-screenshot`)
-
-Start the server first (for example, `./hdmi-usb --debug` or `python3 hdmi-usb.py`), then run:
+**Python 3** + PyGObject / GStreamer (no PyPI packages). Start the RTSP server first (for example, `./hdmi-usb --debug` or `python3 hdmi-usb.py`), then run:
 
 ```bash
-./hdmi-usb-screenshot
-./hdmi-usb-screenshot --output ~/Pictures
-
-# Low-res mode: save a 640x360 PNG and print BASE64 to stdout
-./hdmi-usb-screenshot --lowres
+./hdmi-usb-screenshot-mcp
+./hdmi-usb-screenshot-mcp -u rtsp://127.0.0.1:1234/hdmi --debug
 ```
 
-In `--lowres` mode, the script prints:
+The process speaks the **Model Context Protocol** on **stdin/stdout** (JSON-RPC 2.0 with `Content-Length` message framing). After TCP and RTSP preflight, it continuously decodes video to **640×360 PNG** frames and implements **`get_last_frame`** (`tools/call`) returning MCP `image` content (`image/png`, base64). **Stderr** is for logs and errors only.
 
-```text
-OK
-FILENAME=<absolute path to the PNG file>
-WIDTH=640
-HEIGHT=360
-BASE64=<base64-encoded PNG>
+CLI flags: `--url` / `-u`, `--debug` / `-d`, `--connect-retries`, `--connect-delay` (see `--help`). Environment: `RTSP_URL`, `CONNECT_RETRIES`, `CONNECT_DELAY_SECONDS`.
+
+Example Cursor `mcpServers` entry:
+
+```json
+{
+  "mcpServers": {
+    "hdmi-screenshot": {
+      "command": "/path/to/hdmi-usb-screenshot-mcp",
+      "env": { "RTSP_URL": "rtsp://127.0.0.1:1234/hdmi" }
+    }
+  }
+}
 ```
-
-Use `--help` on each script for more options.
 
 ## Installation
 
@@ -130,6 +120,13 @@ sudo apt install ffmpeg
 
 ## Testing
 
+`test_hdmi_usb_screenshot_mcp.py` spawns **`hdmi-usb-screenshot-mcp`**, runs `initialize` / `ping` / `tools/list` / `tools/call` for `get_last_frame`, and checks that the returned base64 decodes to a valid PNG. Requires an **already running** RTSP server (default URL `rtsp://127.0.0.1:1234/hdmi`).
+
+```bash
+python3 test_hdmi_usb_screenshot_mcp.py
+python3 test_hdmi_usb_screenshot_mcp.py --frame-wait 60 --debug-child
+```
+
 `integration-test.sh` is a best-effort integration test that installs the scripts into `~/.local/bin`, then exercises the most important user-facing flows.
 
 **Covered:**
@@ -138,8 +135,8 @@ sudo apt install ffmpeg
 - `--reset-window` behavior (clears saved window state)
 - RTSP server starts and listens on `127.0.0.1:1234`
 - Local preview window move/resize and window state save/restore (requires X11 + `wmctrl` + `xwininfo`)
-- `hdmi-usb-screenshot` works against the running RTSP server (normal + `--lowres`)
-- Headless mode (`--headless`) + screenshot
+- `test_hdmi_usb_screenshot_mcp.py` against the running RTSP server (MCP stdio)
+- Headless mode (`--headless`) + same MCP test
 
 **Not covered (by design):**
 - Wrapper preflight/recovery (`hdmi-usb` USB reset / `uvcvideo` reload paths)

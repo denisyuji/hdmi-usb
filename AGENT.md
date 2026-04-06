@@ -48,11 +48,11 @@ Launcher script that:
 **MCP-only** RTSP client (default URL `rtsp://127.0.0.1:1234/hdmi`, overridable via `RTSP_URL` / `--url`):
 
 - **Stdio**: JSON-RPC 2.0. **NDJSON** (one JSON object per line) for Cursor / MCP 2025-03-26; **Content-Length** framing still supported for older clients. Replies match the client’s framing. **Initialize** echoes the client’s **`protocolVersion`** when provided.
-- **Startup**: MCP read/write on the **main thread** immediately; **PyGI + `Gst.init()`** load only in the **capture thread** so Cursor does not time out during import.
-- **Pipeline**: leaky bounded **queues** after `rtspsrc`, after `decodebin`, and before **`pngenc`**; **`rtspsrc`** **`drop-on-latency`** + small **`latency`** where supported. Continuous **640×360 PNG** into **`appsink`**.
-- **`get_last_frame`**: uses **`try-pull-sample`** to **drain** pending buffers and waits up to **~500 ms** for the next frame, then returns MCP **`image`** content (base64). **Stderr** only for logs/errors.
+- **Startup**: no background capture thread. The server enters the MCP loop immediately and only spawns `gst-launch-1.0` when a tool call asks for a frame.
+- **Capture path**: each **`get_last_frame`** call runs a short **`gst-launch-1.0 uridecodebin`** burst (`source::protocols=tcp`, `source::latency=100`) through `videoconvert ! videoscale ! pngenc ! multifilesink`, then returns the newest **640×360 PNG** from that burst.
+- **Failure mode**: if `gst-launch-1.0` fails or produces no PNGs yet, the tool returns an MCP error payload saying no frame is available. **Stderr** only for logs/errors.
 
-**Video-only:** rejects the RTSP audio stream **before SETUP** via `rtspsrc`’s `select-stream` signal.
+**Video-only:** the capture burst follows the decoded video branch only; it does not expose audio through MCP.
 
 **Automated check:** `test_hdmi_usb_screenshot_mcp.py` spawns the binary (NDJSON), validates handshake + PNG from `get_last_frame` (RTSP must already be running).
 

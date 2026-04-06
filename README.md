@@ -2,7 +2,7 @@
 
 Scripts to detect and preview using cheap USB HDMI capture devices using GStreamer. Tested with MacroSilicon-based devices. You can either run a **live preview** locally on the machine connected to the capture device over USB, or run an **RTSP server** to stream the capture over the network (optionally with a local preview).
 
-**AI Agent Integration**: The **`hdmi-usb-screenshot-mcp`** helper runs an **[MCP](https://modelcontextprotocol.io/) server** on stdio while the RTSP stream is up; agents call **`get_last_frame`** to receive a **current** HDMI view as a 640×360 PNG (base64). Each tool call **pulls from the GStreamer appsink** (drain + short wait) so the image matches what is on screen, not a stale buffer.
+**AI Agent Integration**: The **`hdmi-usb-screenshot-mcp`** helper runs an **[MCP](https://modelcontextprotocol.io/) server** on stdio while the RTSP stream is up; agents call **`get_last_frame`** to receive a **current** HDMI view as a 640×360 PNG (base64). Each tool call runs a short **`gst-launch-1.0 uridecodebin`** burst and returns the newest PNG from that burst so the image tracks the live screen.
 
 ![Tested on a cheap HDMI capture card](cheap-hdmi-usb.webp)
 
@@ -75,18 +75,18 @@ Use `--help` for more options.
 
 ### MCP frame server (`hdmi-usb-screenshot-mcp`)
 
-**Python 3** + PyGObject / GStreamer (no PyPI packages). Start the RTSP server first (for example, `./hdmi-usb --debug` or `python3 hdmi-usb.py`), then run:
+**Python 3** + GStreamer command-line tools (no PyPI packages). Start the RTSP server first (for example, `./hdmi-usb --debug` or `python3 hdmi-usb.py`), then run:
 
 ```bash
 ./hdmi-usb-screenshot-mcp
 ./hdmi-usb-screenshot-mcp -u rtsp://127.0.0.1:1234/hdmi --debug
 ```
 
-The process speaks **MCP** on **stdin/stdout** (JSON-RPC 2.0). **Cursor and MCP 2025-03-26** use **newline-delimited JSON** (one object per line); **Content-Length** framing is still accepted for older clients. Replies use the same framing as the client’s first message. The **main thread** answers MCP (`initialize`, etc.) **immediately** (PyGI/GStreamer load **after** the MCP loop starts, in the capture thread). **`get_last_frame`** drains **`appsink`** with **`try-pull-sample`** and waits briefly for the next PNG so the snapshot tracks **live** video; the RTSP branch also uses **small leaky queues** and **`rtspsrc` `drop-on-latency`** where supported. **Stderr** is for logs and errors only.
+The process speaks **MCP** on **stdin/stdout** (JSON-RPC 2.0). **Cursor and MCP 2025-03-26** use **newline-delimited JSON** (one object per line); **Content-Length** framing is still accepted for older clients. Replies use the same framing as the client’s first message. The server answers MCP requests immediately. Each **`get_last_frame`** call launches a short **`gst-launch-1.0 uridecodebin`** capture, writes a burst of PNG frames into a temporary directory, and returns the newest one so the snapshot reflects the live HDMI view. **Stderr** is for logs and errors only.
 
 The RTSP server in **`hdmi-usb.py`** uses a **small leaky `queue`** before **`decodebin`** in the factory pipeline so encoded output stays close to the HDMI source (restart the server after upgrading for that change).
 
-CLI flags: `--url` / `-u`, `--debug` / `-d`, `--connect-retries`, `--connect-delay` (see `--help`). Environment: `RTSP_URL`, `CONNECT_RETRIES`, `CONNECT_DELAY_SECONDS`.
+CLI flags: `--url` / `-u`, `--debug` / `-d` (see `--help`). Environment: `RTSP_URL`.
 
 Example Cursor `mcpServers` entry (include `PYTHONUNBUFFERED` so stdio stays responsive):
 

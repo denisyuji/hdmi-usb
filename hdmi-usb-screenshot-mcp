@@ -1,403 +1,102 @@
 #!/usr/bin/env python3
 """
-hdmi-usb-screenshot-mcp — MCP server on stdio: continuous RTSP capture and
-get_last_frame (640×360 PNG as base64).
+hdmi-usb-screenshot-mcp — MCP server on stdio exposing get_last_frame.
 """
 
 from __future__ import annotations
 
 import argparse
 import base64
+import glob
 import json
 import os
-import re
-import socket
+import subprocess
 import sys
-import threading
-import time
-from typing import Any
-
-# Loaded lazily in the capture thread so the main thread can answer MCP
-# initialize immediately (PyGI + Gst.init can take many seconds).
-Gst: Any = None
-GLib: Any = None
-_gstreamer_ready = False
-
-
-def _ensure_gstreamer_loaded() -> None:
-    global Gst, GLib, _gstreamer_ready
-    if _gstreamer_ready:
-        return
-    import gi
-
-    gi.require_version("Gst", "1.0")
-    from gi.repository import Gst as _Gst, GLib as _GLib  # noqa: E402
-
-    Gst, GLib = _Gst, _GLib
-    Gst.init(None)
-    _gstreamer_ready = True
-
+import tempfile
 
 DEFAULT_RTSP_URL = os.environ.get("RTSP_URL", "rtsp://127.0.0.1:1234/hdmi")
-DEFAULT_CONNECT_RETRIES = int(os.environ.get("CONNECT_RETRIES", "10"))
-DEFAULT_CONNECT_DELAY = float(os.environ.get("CONNECT_DELAY_SECONDS", "1"))
-# Advertised when client omits protocolVersion; echo client's version when given.
 MCP_PROTOCOL_VERSION = "2024-11-05"
+_capture_url = DEFAULT_RTSP_URL
+_capture_debug = False
 
 
-def parse_rtsp_host_port(url: str) -> tuple[str, int] | None:
-    m = re.match(r"^rtsp://([^/:]+)(?::([0-9]+))?(/.*)?$", url)
-    if not m:
+def _capture_png_via_gst_launch(url: str, debug: bool) -> bytes | None:
+    """Grab a current frame using a short uridecodebin-based gst-launch burst."""
+    tmp_dir = tempfile.mkdtemp(prefix="hdmi-usb-screenshot-mcp-")
+    pattern = os.path.join(tmp_dir, "frame_%05d.png")
+
+    cmd = [
+        "timeout",
+        "10",
+        "gst-launch-1.0",
+        "-q",
+        "uridecodebin",
+        f"uri={url}",
+        "source::protocols=tcp",
+        "source::latency=100",
+        "name=dec",
+        "dec.",
+        "!",
+        "queue",
+        "!",
+        "videoconvert",
+        "!",
+        "videoscale",
+        "!",
+        "video/x-raw,format=RGBA,width=640,height=360,pixel-aspect-ratio=1/1",
+        "!",
+        "pngenc",
+        "!",
+        "multifilesink",
+        f"location={pattern}",
+        "max-files=50",
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=12,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        if debug:
+            print(f"[ERR] gst-launch capture failed: {e}", file=sys.stderr)
         return None
-    host = m.group(1)
-    port = int(m.group(2) or "554")
-    return host, port
 
+    if proc.returncode not in (0, 124):
+        if debug and proc.stderr:
+            print(proc.stderr.decode("utf-8", errors="replace"), file=sys.stderr)
+        return None
 
-def tcp_port_open(host: str, port: int, timeout: float = 1.0) -> bool:
     try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except OSError:
-        return False
-
-
-def wait_for_tcp_ok(url: str, retries: int, delay: float, debug: bool) -> bool:
-    parsed = parse_rtsp_host_port(url)
-    if not parsed:
-        print("[ERR] Invalid RTSP URL (expected rtsp://HOST:PORT/PATH)", file=sys.stderr)
-        return False
-    host, port = parsed
-    for attempt in range(1, retries + 1):
-        if tcp_port_open(host, port):
-            if debug:
-                print(f"[INFO] TCP port open: {host}:{port}", file=sys.stderr)
-            return True
-        if attempt >= retries:
-            print(
-                f"[ERR] RTSP server not listening on {host}:{port}",
-                file=sys.stderr,
-            )
-            return False
+        frames = sorted(glob.glob(os.path.join(tmp_dir, "frame_*.png")))
+        if not frames:
+            if debug and proc.stderr:
+                print(
+                    "[ERR] gst-launch produced no PNG frames\n"
+                    + proc.stderr.decode("utf-8", errors="replace"),
+                    file=sys.stderr,
+                )
+            return None
+        data = open(frames[-1], "rb").read()
+    except OSError as e:
         if debug:
-            print(
-                f"[INFO] Port not open yet; retry {attempt}/{retries}...",
-                file=sys.stderr,
-            )
-        time.sleep(delay)
-    return False
-
-
-def run_rtsp_test(url: str, debug: bool) -> bool:
-    pipeline = Gst.Pipeline.new("rtsp-test")
-    src = Gst.ElementFactory.make("rtspsrc", "src")
-    sink = Gst.ElementFactory.make("fakesink", "sink")
-    if not src or not sink:
-        print("[ERR] Failed to create test elements", file=sys.stderr)
-        return False
-
-    src.set_property("location", url)
-    src.set_property("protocols", 0x4)
-    src.set_property("latency", 0)
-
-    def select_stream(_src, stream_id, caps):
-        media = None
+            print(f"[ERR] Failed to read temporary PNG: {e}", file=sys.stderr)
+        return None
+    finally:
         try:
-            if caps and caps.get_size() > 0:
-                s = caps.get_structure(0)
-                media = s.get_string("media")
-        except Exception:
-            media = None
-        accept = media == "video"
-        if debug:
-            print(
-                f"[INFO] select-stream stream={stream_id} media={media!r} -> "
-                f"{'ACCEPT' if accept else 'REJECT'}",
-                file=sys.stderr,
-            )
-        return accept
-
-    src.connect("select-stream", select_stream)
-    pipeline.add(src)
-    pipeline.add(sink)
-
-    loop = GLib.MainLoop()
-    bus = pipeline.get_bus()
-    bus.add_signal_watch()
-    ok = {"v": False}
-
-    def on_message(_bus, msg):
-        t = msg.type
-        if t == Gst.MessageType.ERROR:
-            err, dbg = msg.parse_error()
-            print(f"[ERR] {err.message}", file=sys.stderr)
-            if debug and dbg:
-                print(f"[ERR] debug: {dbg}", file=sys.stderr)
-            loop.quit()
-        elif t == Gst.MessageType.STATE_CHANGED and msg.src == pipeline:
-            _old, new, _pending = msg.parse_state_changed()
-            if new == Gst.State.PLAYING:
-                ok["v"] = True
-                loop.quit()
-        return True
-
-    bus.connect("message", on_message)
-
-    def on_pad_added(_src, pad):
-        sp = sink.get_static_pad("sink")
-        if sp and not sp.is_linked():
-            pad.link(sp)
-
-    src.connect("pad-added", on_pad_added)
-    pipeline.set_state(Gst.State.PLAYING)
-    GLib.timeout_add_seconds(5, lambda: (loop.quit(), False)[1])
-    loop.run()
-    pipeline.set_state(Gst.State.NULL)
-    return ok["v"]
-
-
-def wait_for_rtsp_ok(url: str, retries: int, delay: float, debug: bool) -> bool:
-    for attempt in range(1, retries + 1):
-        if run_rtsp_test(url, debug):
-            return True
-        if attempt >= retries:
-            print(f"[ERR] Failed to connect to RTSP: {url}", file=sys.stderr)
-            if not debug:
-                print("[ERR] Re-run with --debug for details.", file=sys.stderr)
-            return False
-        if debug:
-            print(
-                f"[INFO] RTSP test failed; retry {attempt}/{retries}...",
-                file=sys.stderr,
-            )
-        time.sleep(delay)
-    return False
-
-
-def _build_capture_branch(
-    pipeline: Gst.Pipeline,
-    src: Gst.Element,
-    url: str,
-    debug: bool,
-    on_sample,
-    loop: GLib.MainLoop,
-    state_ok: dict,
-) -> bool:
-    """rtspsrc -> queue -> decodebin -> ... -> appsink (640×360 PNG)."""
-    global _capture_appsink
-
-    src.set_property("location", url)
-    src.set_property("protocols", 0x4)
-    try:
-        src.set_property("latency", 100)
-        src.set_property("drop-on-latency", True)
-    except (TypeError, ValueError, AttributeError):
-        try:
-            src.set_property("latency", 0)
-        except (TypeError, ValueError, AttributeError):
+            for path in glob.glob(os.path.join(tmp_dir, "*")):
+                os.unlink(path)
+            os.rmdir(tmp_dir)
+        except OSError:
             pass
 
-    def select_stream(_s, stream_id, caps):
-        media = None
-        try:
-            if caps and caps.get_size() > 0:
-                st = caps.get_structure(0)
-                media = st.get_string("media")
-        except Exception:
-            media = None
-        accept = media == "video"
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
         if debug:
-            print(
-                f"[INFO] select-stream stream={stream_id} media={media!r} -> "
-                f"{'ACCEPT' if accept else 'REJECT'}",
-                file=sys.stderr,
-            )
-        return accept
-
-    src.connect("select-stream", select_stream)
-
-    queue = Gst.ElementFactory.make("queue", "queue")
-    decode = Gst.ElementFactory.make("decodebin", "decode")
-    post_decode = Gst.ElementFactory.make("queue", "post_decode_queue")
-    videoconvert = Gst.ElementFactory.make("videoconvert", "videoconvert")
-    videoscale = Gst.ElementFactory.make("videoscale", "videoscale")
-    capsfilter = Gst.ElementFactory.make("capsfilter", "capsfilter")
-    pre_png = Gst.ElementFactory.make("queue", "pre_png_queue")
-    pngenc = Gst.ElementFactory.make("pngenc", "pngenc")
-    sink = Gst.ElementFactory.make("appsink", "sink")
-
-    if not all(
-        [
-            queue,
-            decode,
-            post_decode,
-            videoconvert,
-            videoscale,
-            capsfilter,
-            pre_png,
-            pngenc,
-            sink,
-        ]
-    ):
-        print("[ERR] Failed to create pipeline elements", file=sys.stderr)
-        state_ok["ok"] = False
-        return False
-
-    def _configure_live_queue(q: Gst.Element) -> None:
-        q.set_property("max-size-buffers", 1)
-        q.set_property("max-size-time", 0)
-        q.set_property("max-size-bytes", 0)
-        try:
-            q.set_property("leaky", Gst.QueueLeaky.DOWNSTREAM)
-        except (TypeError, AttributeError):
-            q.set_property("leaky", 2)
-
-    # Drop backlog so appsink sees recent frames, not seconds-old RTSP buffer.
-    _configure_live_queue(queue)
-    _configure_live_queue(post_decode)
-    _configure_live_queue(pre_png)
-
-    capsfilter.set_property(
-        "caps",
-        Gst.Caps.from_string(
-            "video/x-raw,format=RGBA,width=640,height=360,pixel-aspect-ratio=1/1"
-        ),
-    )
-    sink.set_property("emit-signals", True)
-    sink.set_property("sync", False)
-    sink.set_property("max-buffers", 1)
-    sink.set_property("drop", True)
-
-    for el in (
-        queue,
-        decode,
-        post_decode,
-        videoconvert,
-        videoscale,
-        capsfilter,
-        pre_png,
-        pngenc,
-        sink,
-    ):
-        pipeline.add(el)
-
-    if not queue.link(decode):
-        print("[ERR] Failed to link queue->decodebin", file=sys.stderr)
-        state_ok["ok"] = False
-        return False
-
-    if not post_decode.link(videoconvert):
-        print("[ERR] Failed to link post_decode->videoconvert", file=sys.stderr)
-        state_ok["ok"] = False
-        return False
-
-    if not videoconvert.link(videoscale):
-        print("[ERR] Failed to link videoconvert->videoscale", file=sys.stderr)
-        state_ok["ok"] = False
-        return False
-    if not videoscale.link(capsfilter):
-        print("[ERR] Failed to link videoscale->capsfilter", file=sys.stderr)
-        state_ok["ok"] = False
-        return False
-    if not capsfilter.link(pre_png):
-        print("[ERR] Failed to link capsfilter->pre_png", file=sys.stderr)
-        state_ok["ok"] = False
-        return False
-    if not pre_png.link(pngenc) or not pngenc.link(sink):
-        print("[ERR] Failed to link pre_png/pngenc/appsink", file=sys.stderr)
-        state_ok["ok"] = False
-        return False
-
-    def on_src_pad_added(_src_el, pad):
-        sp = queue.get_static_pad("sink")
-        if sp and not sp.is_linked():
-            pad.link(sp)
-
-    def on_decode_pad_added(_dec, pad):
-        caps = pad.get_current_caps() or pad.query_caps(None)
-        if not caps or caps.get_size() == 0:
-            return
-        st = caps.get_structure(0)
-        if not st.get_name().startswith("video/"):
-            return
-        sp = post_decode.get_static_pad("sink")
-        if sp and not sp.is_linked():
-            pad.link(sp)
-
-    src.connect("pad-added", on_src_pad_added)
-    decode.connect("pad-added", on_decode_pad_added)
-
-    def on_new_sample(appsink):
-        sample = appsink.emit("pull-sample")
-        if not sample:
-            return Gst.FlowReturn.ERROR
-        buf = sample.get_buffer()
-        ok, mapinfo = buf.map(Gst.MapFlags.READ)
-        if not ok:
-            return Gst.FlowReturn.ERROR
-        try:
-            on_sample(bytes(mapinfo.data))
-        finally:
-            buf.unmap(mapinfo)
-        return Gst.FlowReturn.OK
-
-    sink.connect("new-sample", on_new_sample)
-    _capture_appsink = sink
-    return True
-
-
-_last_frame_lock = threading.Lock()
-_last_png: bytes | None = None
-_capture_appsink: Any = None
-
-
-def _sample_to_png_bytes(sample) -> bytes | None:
-    if not sample:
+            print("[ERR] gst-launch capture did not return PNG data", file=sys.stderr)
         return None
-    buf = sample.get_buffer()
-    ok, mapinfo = buf.map(Gst.MapFlags.READ)
-    if not ok:
-        return None
-    try:
-        return bytes(mapinfo.data)
-    finally:
-        buf.unmap(mapinfo)
-
-
-def _pull_fresh_png_from_appsink() -> bytes | None:
-    """Drain pending buffers and/or wait briefly so get_last_frame is current.
-
-    The signal-driven path can lag; pulling on demand flushes appsink and
-    waits up to ~300ms for the next encoded frame.
-    """
-    global _last_png
-    if not _gstreamer_ready:
-        return None
-    sink = _capture_appsink
-    if sink is None:
-        return None
-
-    last: bytes | None = None
-    while True:
-        sample = sink.emit("try-pull-sample", 0)
-        if not sample:
-            break
-        b = _sample_to_png_bytes(sample)
-        if b is not None:
-            last = b
-
-    if last is None:
-        sample = sink.emit("try-pull-sample", 500 * Gst.MSECOND)
-        if sample:
-            b = _sample_to_png_bytes(sample)
-            if b is not None:
-                last = b
-
-    if last is not None:
-        with _last_frame_lock:
-            _last_png = last
-        return last
-    return None
+    return data
 
 
 def _read_mcp_message() -> tuple[dict, str] | None:
@@ -502,9 +201,7 @@ def _mcp_tools_call(name: str, _arguments: dict | None) -> dict:
                 }
             ],
         }
-    fresh = _pull_fresh_png_from_appsink()
-    with _last_frame_lock:
-        png = fresh if fresh is not None else _last_png
+    png = _capture_png_via_gst_launch(_capture_url, _capture_debug)
     if not png:
         return {
             "isError": True,
@@ -531,80 +228,11 @@ def _mcp_tools_call(name: str, _arguments: dict | None) -> dict:
     }
 
 
-def run_mcp_server(
-    url: str,
-    debug: bool,
-    connect_retries: int,
-    connect_delay: float,
-) -> None:
-    """MCP JSON-RPC on stdin/stdout immediately; RTSP + GStreamer in background."""
-
-    def capture_thread_main():
-        _ensure_gstreamer_loaded()
-        if not wait_for_tcp_ok(url, connect_retries, connect_delay, debug):
-            print(
-                "[ERR] Capture thread: TCP preflight failed; "
-                "get_last_frame will stay empty until RTSP is up — restart MCP or "
-                "start the server.",
-                file=sys.stderr,
-            )
-            return
-        if not wait_for_rtsp_ok(url, connect_retries, connect_delay, debug):
-            print(
-                "[ERR] Capture thread: RTSP preflight failed; "
-                "get_last_frame will stay empty.",
-                file=sys.stderr,
-            )
-            return
-
-        pipeline = Gst.Pipeline.new("rtsp-mcp")
-        src = Gst.ElementFactory.make("rtspsrc", "src")
-        if not src:
-            print("[ERR] Failed to create rtspsrc", file=sys.stderr)
-            return
-        pipeline.add(src)
-        loop = GLib.MainLoop()
-        bus = pipeline.get_bus()
-        bus.add_signal_watch()
-
-        def on_message(_bus, msg):
-            if msg.type == Gst.MessageType.ERROR:
-                err, dbg = msg.parse_error()
-                print(f"[ERR] {err.message}", file=sys.stderr)
-                if debug and dbg:
-                    print(f"[ERR] debug: {dbg}", file=sys.stderr)
-            return True
-
-        bus.connect("message", on_message)
-        state_ok = {"ok": True}
-
-        def on_sample(png_bytes: bytes):
-            global _last_png
-            with _last_frame_lock:
-                _last_png = png_bytes
-
-        if not _build_capture_branch(
-            pipeline,
-            src,
-            url,
-            debug,
-            on_sample,
-            loop,
-            state_ok,
-        ):
-            return
-
-        if debug:
-            print("[INFO] RTSP capture pipeline PLAYING", file=sys.stderr)
-        pipeline.set_state(Gst.State.PLAYING)
-        loop.run()
-        pipeline.set_state(Gst.State.NULL)
-
-    threading.Thread(
-        target=capture_thread_main,
-        name="capture",
-        daemon=True,
-    ).start()
+def run_mcp_server(url: str, debug: bool) -> None:
+    """MCP JSON-RPC on stdin/stdout immediately."""
+    global _capture_url, _capture_debug
+    _capture_url = url
+    _capture_debug = debug
 
     while True:
         got = _read_mcp_message()
@@ -713,26 +341,9 @@ def main() -> int:
         default=DEFAULT_RTSP_URL,
         help=f"RTSP URL (default: {DEFAULT_RTSP_URL})",
     )
-    p.add_argument(
-        "--connect-retries",
-        type=int,
-        default=DEFAULT_CONNECT_RETRIES,
-        help="TCP/RTSP preflight retries in background (MCP answers immediately)",
-    )
-    p.add_argument(
-        "--connect-delay",
-        type=float,
-        default=DEFAULT_CONNECT_DELAY,
-        help="Seconds between preflight retries",
-    )
     args = p.parse_args()
 
-    run_mcp_server(
-        args.url,
-        args.debug,
-        args.connect_retries,
-        args.connect_delay,
-    )
+    run_mcp_server(args.url, args.debug)
     return 0
 
 

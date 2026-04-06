@@ -5,7 +5,7 @@
 # - RTSP server can start and listen on 1234
 # - Local preview window can be moved/resized
 # - Window geometry is saved and restored across restarts
-# - hdmi-usb-screenshot captures a frame while the server runs in background
+# - test_hdmi_usb_screenshot_mcp.py exercises MCP against the running server
 #
 # Notes:
 # - Window tests require an X11 session with DISPLAY set and tools: wmctrl, xwininfo.
@@ -270,10 +270,9 @@ main() {
   # Force installed mode regardless of the caller's environment.
   USE_INSTALLED=1
 
-  local HDMI_USB_BIN HDMI_USB_PY HDMI_USB_SCREENSHOT
+  local HDMI_USB_BIN HDMI_USB_PY
   HDMI_USB_BIN="$(resolve_bin hdmi-usb "${ROOT_DIR}/hdmi-usb")"
   HDMI_USB_PY="$(resolve_bin hdmi-usb.py "${ROOT_DIR}/hdmi-usb.py")"
-  HDMI_USB_SCREENSHOT="$(resolve_bin hdmi-usb-screenshot "${ROOT_DIR}/hdmi-usb-screenshot")"
 
   # Ensure GStreamer GI is importable early so failures are clear.
   if python3 - <<'PY' >/dev/null
@@ -373,57 +372,22 @@ PY
     mark_skip "Window: resize/move + save/restore (no X11 tools or earlier failure)"
   fi
 
-  # --- Screenshot test (server in background) ---
+  # --- MCP screenshot server (stdio) ---
   if [[ "$goto_summary" != "true" ]]; then
-    info "Running screenshot tool against RTSP server"
-    local shot_out
+    info "Running test_hdmi_usb_screenshot_mcp.py against RTSP server"
+    local mcp_out
     set +e
-    shot_out="$(timeout "$SCREENSHOT_TIMEOUT_SECONDS" "${HDMI_USB_SCREENSHOT}" -o "$TEST_LOG_DIR" -u "$RTSP_URL" 2>&1)"
-    local shot_rc=$?
+    mcp_out="$(timeout "$SCREENSHOT_TIMEOUT_SECONDS" python3 "${ROOT_DIR}/test_hdmi_usb_screenshot_mcp.py" --rtsp-url "$RTSP_URL" --frame-wait "$SCREENSHOT_TIMEOUT_SECONDS" 2>&1)"
+    local mcp_rc=$?
     set -e
-    echo "$shot_out" >>"$LOG_FILE"
-    if [[ "$shot_rc" != "0" ]]; then
-      mark_fail "Screenshot: hdmi-usb-screenshot execution"
+    echo "$mcp_out" >>"$LOG_FILE"
+    if [[ "$mcp_rc" != "0" ]]; then
+      mark_fail "MCP: test_hdmi_usb_screenshot_mcp.py"
     else
-      local png_file base64_file
-      png_file="$(echo "$shot_out" | sed -n 's/^FILENAME=//p' | tail -1)"
-      base64_file="$(echo "$shot_out" | sed -n 's/^BASE64_FILE=//p' | tail -1)"
-
-      if [[ -n "$png_file" && -f "$png_file" && -s "$png_file" && -n "$base64_file" && -f "$base64_file" && -s "$base64_file" ]]; then
-        mark_pass "Screenshot: hdmi-usb-screenshot execution"
-        info "Screenshot OK: $png_file"
-      else
-        mark_fail "Screenshot: output files present/non-empty"
-      fi
-    fi
-
-  else
-    mark_skip "Screenshot: hdmi-usb-screenshot execution (server not ready)"
-  fi
-
-  # --- Screenshot test: low-res BASE64 output (no files written) ---
-  if [[ "$goto_summary" != "true" ]]; then
-    info "Running screenshot tool against RTSP server (lowres BASE64)"
-    local lowres_out
-    set +e
-    lowres_out="$(timeout "$SCREENSHOT_TIMEOUT_SECONDS" "${HDMI_USB_SCREENSHOT}" --lowres -u "$RTSP_URL" 2>&1)"
-    local lowres_rc=$?
-    set -e
-    echo "$lowres_out" >>"$LOG_FILE"
-    if [[ "$lowres_rc" != "0" ]]; then
-      mark_fail "Lowres screenshot: hdmi-usb-screenshot --lowres execution"
-    else
-      local b64_line png_file
-      b64_line="$(echo "$lowres_out" | sed -n 's/^BASE64=//p' | tail -1)"
-      png_file="$(echo "$lowres_out" | sed -n 's/^FILENAME=//p' | tail -1)"
-      if [[ -n "$b64_line" && -n "$png_file" && -f "$png_file" && -s "$png_file" ]]; then
-        mark_pass "Lowres screenshot: BASE64 + PNG output present"
-      else
-        mark_fail "Lowres screenshot: BASE64 + PNG output present"
-      fi
+      mark_pass "MCP: test_hdmi_usb_screenshot_mcp.py"
     fi
   else
-    mark_skip "Lowres screenshot: hdmi-usb-screenshot --lowres execution (server not ready)"
+    mark_skip "MCP: test_hdmi_usb_screenshot_mcp.py (server not ready)"
   fi
 
   # --- Restart server and verify restore (optional) ---
@@ -461,7 +425,7 @@ PY
 
   # --- Headless mode sanity check ---
   if [[ "$goto_summary" != "true" ]]; then
-    info "Running headless mode test (--headless): start server + screenshot"
+    info "Running headless mode test (--headless): start server + MCP test"
     kill_server "$SERVER_PID"
     SERVER_PID=""
     sleep 2
@@ -473,28 +437,19 @@ PY
       mark_fail "Headless: RTSP server creation (${RTSP_HOST}:${RTSP_PORT})"
     fi
 
-    local headless_shot_out
+    local headless_mcp_out
     set +e
-    headless_shot_out="$(timeout "$SCREENSHOT_TIMEOUT_SECONDS" "${HDMI_USB_SCREENSHOT}" -o "$TEST_LOG_DIR" -u "$RTSP_URL" 2>&1)"
-    local headless_shot_rc=$?
+    headless_mcp_out="$(timeout "$SCREENSHOT_TIMEOUT_SECONDS" python3 "${ROOT_DIR}/test_hdmi_usb_screenshot_mcp.py" --rtsp-url "$RTSP_URL" --frame-wait "$SCREENSHOT_TIMEOUT_SECONDS" 2>&1)"
+    local headless_mcp_rc=$?
     set -e
-    echo "$headless_shot_out" >>"$LOG_FILE"
-    if [[ "$headless_shot_rc" != "0" ]]; then
-      mark_fail "Headless: hdmi-usb-screenshot execution"
+    echo "$headless_mcp_out" >>"$LOG_FILE"
+    if [[ "$headless_mcp_rc" != "0" ]]; then
+      mark_fail "Headless: test_hdmi_usb_screenshot_mcp.py"
     else
-      local headless_png_file headless_base64_file
-      headless_png_file="$(echo "$headless_shot_out" | sed -n 's/^FILENAME=//p' | tail -1)"
-      headless_base64_file="$(echo "$headless_shot_out" | sed -n 's/^BASE64_FILE=//p' | tail -1)"
-
-      if [[ -n "$headless_png_file" && -f "$headless_png_file" && -s "$headless_png_file" && -n "$headless_base64_file" && -f "$headless_base64_file" && -s "$headless_base64_file" ]]; then
-        mark_pass "Headless: hdmi-usb-screenshot execution"
-        info "Headless screenshot OK: $headless_png_file"
-      else
-        mark_fail "Headless: screenshot output files present/non-empty"
-      fi
+      mark_pass "Headless: test_hdmi_usb_screenshot_mcp.py"
     fi
   else
-    mark_skip "Headless: start server + screenshot (skipped)"
+    mark_skip "Headless: start server + MCP test (skipped)"
   fi
 
   # --- Summary ---

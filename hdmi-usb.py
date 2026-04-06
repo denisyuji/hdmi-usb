@@ -41,8 +41,9 @@ except Exception:
     pass
 
 gi.require_version('Gst', '1.0')
+gi.require_version('GstRtsp', '1.0')
 gi.require_version('GstRtspServer', '1.0')
-from gi.repository import Gst, GstRtspServer, GLib, GObject
+from gi.repository import Gst, GstRtsp, GstRtspServer, GLib, GObject
 
 # Configuration constants
 DEFAULT_RTSP_PORT = "1234"
@@ -53,7 +54,7 @@ AUDIO_SAMPLE_RATE_HZ = 48000
 AUDIO_BITRATE_BPS = 128000
 VIDEO_BITRATE_KBPS = 3000
 VIDEO_KEYFRAME_INTERVAL_FRAMES = 30
-VIDEO_CAPTURE_MAX_FPS = 30
+VIDEO_CAPTURE_FPS = 25
 
 
 def _round_even(value: int) -> int:
@@ -88,8 +89,15 @@ def setup_gstreamer_debug():
 
     # If the user explicitly requests GStreamer logs, enable them.
     if '--gst-debug' in argv:
-        # Set general debug level to 3, but suppress videodecoder warnings (level 1 = errors only)
-        os.environ['GST_DEBUG'] = os.environ.get('GST_DEBUG', '3,videodecoder:1')
+        # Keep important pipeline diagnostics, but suppress recurring benign
+        # warnings/FIXMEs from GStreamer internals and device drivers that are
+        # expected on this capture stack and drown out actionable issues.
+        os.environ['GST_DEBUG'] = os.environ.get(
+            'GST_DEBUG',
+            '3,default:2,videodecoder:1,rtspstream:1,rtpsession:1,'
+            'rtspmedia:1,udpsrc:1,rtpjitterbuffer:1,GST_PADS:1,alsa:1,'
+            'v4l2:1,v4l2bufferpool:1'
+        )
         os.environ['GST_DEBUG_NO_COLOR'] = '1'
         return
 
@@ -1416,6 +1424,27 @@ class LocalDisplayPipeline:
         if not playbin:
             raise RuntimeError("Failed to create playbin element")
 
+        def _on_source_setup(_playbin, source) -> None:
+            """Tune the local RTSP client to avoid noisy UDP startup warnings."""
+            try:
+                factory = source.get_factory()
+                factory_name = factory.get_name() if factory else ""
+            except Exception:
+                factory_name = ""
+
+            if factory_name != "rtspsrc":
+                return
+
+            try:
+                source.set_property("protocols", GstRtsp.RTSPLowerTrans.TCP)
+            except Exception:
+                pass
+            try:
+                source.set_property("latency", RTSP_LATENCY_MS)
+            except Exception:
+                pass
+
+        playbin.connect("source-setup", _on_source_setup)
         playbin.set_property("uri", self.rtsp_url)
 
         # Prefer explicit sinks so window behavior is stable.
@@ -1616,8 +1645,10 @@ class RTSPServer(GstRtspServer.RTSPServer):
             source = f'v4l2src device={video_device} do-timestamp=true ! '
             decoder = (
                 (
-                    f'image/jpeg,framerate=(fraction)[1/1,{VIDEO_CAPTURE_MAX_FPS}/1] '
-                    f'! jpegdec ! '
+                    'queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 '
+                    'leaky=downstream ! '
+                    f'image/jpeg,framerate={VIDEO_CAPTURE_FPS}/1 ! '
+                    'jpegdec ! '
                 )
                 if use_mjpeg
                 else (

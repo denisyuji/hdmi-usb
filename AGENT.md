@@ -22,6 +22,7 @@ Unified HDMI USB RTSP server (and local preview).
 - **RTSP server**:
   - Serves RTSP at `rtsp://0.0.0.0:1234/hdmi` (default).
   - Uses a **static `RTSPMediaFactory.set_launch()` pipeline** so multiple RTSP clients don’t trigger multiple `v4l2src` opens (prevents `Device is busy` / RTSP `503` issues).
+  - **Video path (non-MJPEG)**: **`queue max-size-buffers=2 max-size-time=0 leaky=downstream ! decodebin !`** before encoding so the H.264 stream tracks **live** HDMI with minimal backlog (restart server after code updates).
 - **Local preview**:
   - By default, the local preview is an **RTSP client** (`playbin`) connecting to the local server.
   - Window geometry is saved/restored and the window is kept at 16:9.
@@ -46,17 +47,20 @@ Launcher script that:
 ### hdmi-usb-screenshot-mcp
 **MCP-only** RTSP client (default URL `rtsp://127.0.0.1:1234/hdmi`, overridable via `RTSP_URL` / `--url`):
 
-- **Stdio**: JSON-RPC 2.0 with `Content-Length` framing on stdin/stdout.
-- **Pipeline**: after TCP + RTSP preflight, a background thread runs continuous **640×360 PNG** capture; **`get_last_frame`** returns the latest frame as MCP `image` content (base64). **Stderr** only for logs/errors.
+- **Stdio**: JSON-RPC 2.0. **NDJSON** (one JSON object per line) for Cursor / MCP 2025-03-26; **Content-Length** framing still supported for older clients. Replies match the client’s framing. **Initialize** echoes the client’s **`protocolVersion`** when provided.
+- **Startup**: MCP read/write on the **main thread** immediately; **PyGI + `Gst.init()`** load only in the **capture thread** so Cursor does not time out during import.
+- **Pipeline**: leaky bounded **queues** after `rtspsrc`, after `decodebin`, and before **`pngenc`**; **`rtspsrc`** **`drop-on-latency`** + small **`latency`** where supported. Continuous **640×360 PNG** into **`appsink`**.
+- **`get_last_frame`**: uses **`try-pull-sample`** to **drain** pending buffers and waits up to **~500 ms** for the next frame, then returns MCP **`image`** content (base64). **Stderr** only for logs/errors.
 
 **Video-only:** rejects the RTSP audio stream **before SETUP** via `rtspsrc`’s `select-stream` signal.
 
-**Automated check:** `test_hdmi_usb_screenshot_mcp.py` spawns the binary and validates handshake + PNG from `get_last_frame` (RTSP must already be running).
+**Automated check:** `test_hdmi_usb_screenshot_mcp.py` spawns the binary (NDJSON), validates handshake + PNG from `get_last_frame` (RTSP must already be running).
 
 ### install.sh
 - **System Installation**: Copies scripts to `~/.local/bin/` (`hdmi-usb.py`, `hdmi-usb`, `hdmi-usb-screenshot-mcp`)
 - **PATH Management**: Automatically adds `~/.local/bin` to shell PATH
 - **Shell Detection**: Supports bash, zsh, fish, and other shells
+- **Cursor MCP**: Merges `~/.cursor/mcp.json` entry **`hdmi-screenshot`** (`command` → `~/.local/bin/hdmi-usb-screenshot-mcp`, env `RTSP_URL`, `PYTHONUNBUFFERED=1`); skips on invalid JSON with a warning
 
 ## Technical Details
 

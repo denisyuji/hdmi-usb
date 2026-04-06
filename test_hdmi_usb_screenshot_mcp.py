@@ -21,34 +21,43 @@ from pathlib import Path
 
 
 def _write_mcp(proc: subprocess.Popen, obj: dict) -> None:
+    """MCP 2025-03-26 stdio: one JSON-RPC object per line (matches Cursor)."""
     assert proc.stdin is not None
-    data = json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    header = f"Content-Length: {len(data)}\r\n\r\n".encode("ascii")
-    proc.stdin.write(header + data)
+    line = json.dumps(obj, separators=(",", ":"), ensure_ascii=False) + "\n"
+    proc.stdin.write(line.encode("utf-8"))
     proc.stdin.flush()
 
 
 def _read_mcp(proc: subprocess.Popen) -> dict | None:
     assert proc.stdout is not None
-    headers: dict[bytes, bytes] = {}
-    while True:
-        line = proc.stdout.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        if b":" not in line:
-            continue
-        name, _, value = line.partition(b":")
+    line = proc.stdout.readline()
+    if not line:
+        return None
+    raw = line.strip()
+    if not raw:
+        return None
+    if raw.startswith(b"{"):
+        return json.loads(raw.decode("utf-8"))
+    if raw.lower().startswith(b"content-length:"):
+        headers: dict[bytes, bytes] = {}
+        name, _, value = raw.partition(b":")
         headers[name.strip().lower()] = value.strip()
-    cl = headers.get(b"content-length")
-    if cl is None:
-        return None
-    n = int(cl)
-    body = proc.stdout.read(n)
-    if len(body) != n:
-        return None
-    return json.loads(body.decode("utf-8"))
+        while True:
+            line2 = proc.stdout.readline()
+            if not line2 or line2 in (b"\r\n", b"\n") or not line2.strip():
+                break
+            if b":" in line2:
+                n2, _, v2 = line2.partition(b":")
+                headers[n2.strip().lower()] = v2.strip()
+        cl = headers.get(b"content-length")
+        if cl is None:
+            return None
+        n = int(cl)
+        body = proc.stdout.read(n)
+        if len(body) != n:
+            return None
+        return json.loads(body.decode("utf-8"))
+    return json.loads(raw.decode("utf-8"))
 
 
 def _drain_stderr(proc: subprocess.Popen, lines: list[str]) -> None:

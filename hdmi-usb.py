@@ -1603,7 +1603,14 @@ class RTSPServer(GstRtspServer.RTSPServer):
                 raise RuntimeError("No video device specified for RTSP launch")
 
             source = f'v4l2src device={video_device} ! '
-            decoder = 'image/jpeg ! jpegdec ! ' if use_mjpeg else 'queue ! decodebin ! '
+            decoder = (
+                'image/jpeg ! jpegdec ! '
+                if use_mjpeg
+                else (
+                    'queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 '
+                    'leaky=downstream ! decodebin ! '
+                )
+            )
             encoder = (
                 f'videoconvert ! video/x-raw,format=I420 ! '
                 f'x264enc tune=zerolatency key-int-max={VIDEO_KEYFRAME_INTERVAL_FRAMES} '

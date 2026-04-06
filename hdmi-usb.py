@@ -53,6 +53,7 @@ AUDIO_SAMPLE_RATE_HZ = 48000
 AUDIO_BITRATE_BPS = 128000
 VIDEO_BITRATE_KBPS = 3000
 VIDEO_KEYFRAME_INTERVAL_FRAMES = 30
+VIDEO_CAPTURE_MAX_FPS = 30
 
 
 def _round_even(value: int) -> int:
@@ -139,8 +140,18 @@ atexit.register(cleanup_all)
 def get_window_state_path() -> Path:
     """Return a fixed path for saving/loading window geometry (independent of cwd).
     Uses XDG config directory so the file is always in the same place."""
-    xdg = os.environ.get('XDG_CONFIG_HOME') or str(Path.home() / '.config')
-    return Path(xdg) / 'hdmi-usb' / 'window-state'
+    xdg = os.environ.get('XDG_CONFIG_HOME')
+    if xdg:
+        xdg_path = Path(xdg).expanduser()
+        # The XDG base dir spec requires an absolute path. If a relative path is
+        # exported, falling back avoids making window state depend on the cwd.
+        if xdg_path.is_absolute():
+            config_home = xdg_path
+        else:
+            config_home = Path.home() / '.config'
+    else:
+        config_home = Path.home() / '.config'
+    return config_home / 'hdmi-usb' / 'window-state'
 
 
 def timestamp() -> str:
@@ -1602,9 +1613,12 @@ class RTSPServer(GstRtspServer.RTSPServer):
             if not video_device:
                 raise RuntimeError("No video device specified for RTSP launch")
 
-            source = f'v4l2src device={video_device} ! '
+            source = f'v4l2src device={video_device} do-timestamp=true ! '
             decoder = (
-                'image/jpeg ! jpegdec ! '
+                (
+                    f'image/jpeg,framerate=(fraction)[1/1,{VIDEO_CAPTURE_MAX_FPS}/1] '
+                    f'! jpegdec ! '
+                )
                 if use_mjpeg
                 else (
                     'queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 '
@@ -1612,7 +1626,8 @@ class RTSPServer(GstRtspServer.RTSPServer):
                 )
             )
             encoder = (
-                f'videoconvert ! video/x-raw,format=I420 ! '
+                f'queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 '
+                f'leaky=downstream ! videoconvert ! video/x-raw,format=I420 ! '
                 f'x264enc tune=zerolatency key-int-max={VIDEO_KEYFRAME_INTERVAL_FRAMES} '
                 f'bitrate={VIDEO_BITRATE_KBPS} speed-preset=veryfast '
                 f'byte-stream=true threads=1 ! '

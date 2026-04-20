@@ -385,12 +385,15 @@ class HDMIDeviceDetector:
             return False
 
     def reset_device_state(self, video_dev: str) -> bool:
-        """Reset device state by closing any open streams.
-        
-        From hdmi-usb.py - recovers from stuck device states.
+        """Validate that the v4l2 device is queryable and can stream.
+
+        Note: USB-level reset is intentionally NOT performed here.  A USB reset
+        de-asserts the HDMI Hot-Plug-Detect (HPD) signal briefly, which causes
+        the HDMI source (e.g. Amlogic) to disable its transmitter — producing a
+        black screen.  Instead, the device is kept open at all times via
+        open_keepalive() so HPD stays asserted continuously.
         """
         try:
-            # Try to query the device - this will fail if device is truly broken
             result = subprocess.run(
                 ['v4l2-ctl', '-d', video_dev, '--all'],
                 capture_output=True,
@@ -400,8 +403,7 @@ class HDMIDeviceDetector:
             if result.returncode != 0:
                 self.log(f"Warning: Cannot query device {video_dev}, may be in bad state")
                 return False
-            
-            # Check if device can stream
+
             if not self.check_device_streaming(video_dev):
                 print(f"❌ ERROR: Device {video_dev} is in a bad state (STREAMON fails)", file=sys.stderr)
                 print("   This usually happens when a previous process didn't close the device properly.", file=sys.stderr)
@@ -410,20 +412,25 @@ class HDMIDeviceDetector:
                 print("     2. Reset the USB device: sudo usb_modeswitch -v 0x534d -p 0x2109 -R", file=sys.stderr)
                 print("     3. Reload the driver: sudo modprobe -r uvcvideo && sudo modprobe uvcvideo", file=sys.stderr)
                 return False
-            
-            # Try to set format explicitly to reset device state
-            subprocess.run(
-                ['v4l2-ctl', '-d', video_dev, '--set-fmt-video=pixelformat=MJPG,width=640,height=480'],
-                capture_output=True,
-                timeout=2
-            )
-            
-            # Small delay to let device settle
-            time.sleep(0.2)
+
             return True
         except Exception as e:
-            self.log(f"Error resetting device state: {e}")
+            self.log(f"Error checking device state: {e}")
             return False
+
+    def open_keepalive(self, video_dev: str) -> bool:
+        """No-op: opening the device file-descriptor alone is not sufficient.
+
+        The MacroSilicon MS2109 only asserts HDMI Hot-Plug-Detect (HPD) while
+        the v4l2 device is actively *streaming* (VIDIOC_STREAMON called).
+        Simply opening the device file without streaming does not keep HPD
+        asserted.  The correct keepalive is the internal RTSP fakesink pipeline
+        started by RTSPServer._start_keepalive_pipeline().
+        """
+        return True
+
+    def close_keepalive(self) -> None:
+        """No-op: see open_keepalive()."""
 
     def _extract_usb_path_tail(self, device: str) -> Optional[str]:
         """Extract USB path tail for video device."""
@@ -543,7 +550,7 @@ class HDMIDeviceDetector:
         """Detect video HDMI capture device with state validation."""
         for node in self.pick_nodes_by_name():
             if node and self.is_video_hdmi_usb(node):
-                # Reset device state before returning
+                # Validate the device can stream
                 if self.reset_device_state(node):
                     return node
                 else:
@@ -1757,13 +1764,14 @@ class RTSPServer(GstRtspServer.RTSPServer):
         self.audio_device_spec: Optional[str] = None
         self.set_address("0.0.0.0")
         self.set_service(self.port)
+        self._keepalive_pipeline = None  # Internal RTSP client keeping v4l2 streaming
         
         # Register cleanup function for robust cleanup
         register_cleanup(self.shutdown)
 
         # Detect HDMI devices with enhanced validation
-        detector = HDMIDeviceDetector(debug_mode=debug_mode)
-        video_device = detector.detect_video_device()
+        self.detector = HDMIDeviceDetector(debug_mode=debug_mode)
+        video_device = self.detector.detect_video_device()
         audio_card = None
 
         if not video_device:
@@ -1772,7 +1780,7 @@ class RTSPServer(GstRtspServer.RTSPServer):
             )
 
         if video_device:
-            audio_card = detector.detect_audio_card(video_device)
+            audio_card = self.detector.detect_audio_card(video_device)
             print(f"[{timestamp()}] ✅ Found video device: {video_device}")
             if audio_card:
                 print(f"[{timestamp()}] ✅ Found audio card: {audio_card}")
@@ -1864,6 +1872,67 @@ class RTSPServer(GstRtspServer.RTSPServer):
                 print(f"[{timestamp()}] ⚠️  Local display failed to start, "
                       f"continuing with RTSP server only")
                 self.local_display = None
+        else:
+            # In headless mode there is no local display to keep the v4l2
+            # pipeline alive between external client sessions.  Start an
+            # internal keepalive client that holds the pipeline running so
+            # STREAMON stays active and HDMI HPD is continuously asserted.
+            print(f"[{timestamp()}] 🖥️  Waiting for RTSP server to be ready...")
+            time.sleep(2)
+            self._start_keepalive_pipeline(rtsp_url)
+
+    def _start_keepalive_pipeline(self, rtsp_url: str) -> None:
+        """Start a silent internal RTSP client to keep the v4l2 pipeline streaming.
+
+        The GStreamer RTSP server only starts the v4l2 capture pipeline (and
+        thus VIDIOC_STREAMON) when the first external client connects.  Between
+        client sessions the pipeline stops, the v4l2 device closes, and the
+        MS2109 de-asserts HDMI HPD — causing the HDMI source (e.g. Amlogic) to
+        disable its transmitter and produce a black screen on reconnect.
+
+        This internal fakesink client starts immediately on server startup and
+        stays connected for the server's lifetime, keeping STREAMON active and
+        HPD asserted at all times regardless of external client activity.
+        """
+        try:
+            playbin = Gst.ElementFactory.make("playbin", "keepalive_playbin")
+            if not playbin:
+                print(f"[{timestamp()}] ⚠️  Could not create keepalive pipeline element")
+                return
+
+            fakevideo = Gst.ElementFactory.make("fakesink", "keepalive_video")
+            fakeaudio = Gst.ElementFactory.make("fakesink", "keepalive_audio")
+            for sink in (fakevideo, fakeaudio):
+                if sink:
+                    sink.set_property("sync", False)
+                    sink.set_property("silent", True)
+
+            playbin.set_property("uri", rtsp_url)
+            if fakevideo:
+                playbin.set_property("video-sink", fakevideo)
+            if fakeaudio:
+                playbin.set_property("audio-sink", fakeaudio)
+
+            def _on_source_setup(_playbin, source):
+                try:
+                    factory = source.get_factory()
+                    if factory and factory.get_name() == "rtspsrc":
+                        source.set_property("protocols", GstRtsp.RTSPLowerTrans.TCP)
+                        source.set_property("latency", RTSP_LATENCY_MS)
+                except Exception:
+                    pass
+
+            playbin.connect("source-setup", _on_source_setup)
+
+            ret = playbin.set_state(Gst.State.PLAYING)
+            if ret == Gst.StateChangeReturn.FAILURE:
+                print(f"[{timestamp()}] ⚠️  Keepalive pipeline failed to start")
+                return
+
+            self._keepalive_pipeline = playbin
+            print(f"[{timestamp()}] 🔗 Keepalive pipeline started (HDMI HPD will stay asserted)")
+        except Exception as e:
+            print(f"[{timestamp()}] ⚠️  Could not start keepalive pipeline: {e}")
 
     def on_client_connected(self, server, client):
         """Handle client connection."""
@@ -1902,7 +1971,15 @@ class RTSPServer(GstRtspServer.RTSPServer):
                 print(f"[{timestamp()}] 🖥️  Stopping local display...")
                 self.local_display.stop()
                 self.local_display = None
-            
+
+            if self._keepalive_pipeline:
+                self._keepalive_pipeline.set_state(Gst.State.NULL)
+                self._keepalive_pipeline = None
+
+            # Release keepalive fd last so HPD stays asserted as long as possible
+            if self.detector:
+                self.detector.close_keepalive()
+
             # Quit the main loop to exit gracefully
             if self.main_loop:
                 GLib.idle_add(self.main_loop.quit)

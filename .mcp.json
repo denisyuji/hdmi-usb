@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "hdmi-usb-screenshot": {
+      "type": "stdio",
+      "command": "/home/denis/Dropbox/myprojects/hdmi-usb/hdmi-usb-screenshot-mcp",
+      "env": {
+        "RTSP_URL": "rtsp://127.0.0.1:1234/hdmi",
+        "PYTHONUNBUFFERED": "1"
+      }
+    }
+  }
+}

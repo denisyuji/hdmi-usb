@@ -1,0 +1,6 @@
+{
+  "enabledMcpjsonServers": [
+    "hdmi-usb-screenshot"
+  ],
+  "enableAllProjectMcpServers": true
+}

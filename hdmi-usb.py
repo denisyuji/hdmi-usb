@@ -1929,6 +1929,20 @@ class RTSPServer(GstRtspServer.RTSPServer):
                 print(f"[{timestamp()}] ⚠️  Keepalive pipeline failed to start")
                 return
 
+            bus = playbin.get_bus()
+            if bus:
+                bus.add_signal_watch()
+                def _on_keepalive_bus_message(_bus, message):
+                    if message.type == Gst.MessageType.ERROR:
+                        err, debug_info = message.parse_error()
+                        error_msg = err.message
+                        if debug_info:
+                            error_msg = f"{error_msg} ({debug_info})"
+                        print(f"❌ GStreamer keepalive pipeline ERROR: {error_msg}")
+                        self.on_pipeline_error(error_msg)
+                    return True
+                bus.connect("message", _on_keepalive_bus_message)
+
             self._keepalive_pipeline = playbin
             print(f"[{timestamp()}] 🔗 Keepalive pipeline started (HDMI HPD will stay asserted)")
         except Exception as e:
@@ -1973,6 +1987,9 @@ class RTSPServer(GstRtspServer.RTSPServer):
                 self.local_display = None
 
             if self._keepalive_pipeline:
+                bus = self._keepalive_pipeline.get_bus()
+                if bus:
+                    bus.remove_signal_watch()
                 self._keepalive_pipeline.set_state(Gst.State.NULL)
                 self._keepalive_pipeline = None
 

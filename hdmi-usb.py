@@ -390,8 +390,8 @@ class HDMIDeviceDetector:
         Note: USB-level reset is intentionally NOT performed here.  A USB reset
         de-asserts the HDMI Hot-Plug-Detect (HPD) signal briefly, which causes
         the HDMI source (e.g. Amlogic) to disable its transmitter — producing a
-        black screen.  Instead, the device is kept open at all times via
-        open_keepalive() so HPD stays asserted continuously.
+        black screen.  Instead, the app-owned capture pipeline keeps VIDIOC_STREAMON
+        active continuously so HPD stays asserted.
         """
         try:
             result = subprocess.run(
@@ -417,20 +417,6 @@ class HDMIDeviceDetector:
         except Exception as e:
             self.log(f"Error checking device state: {e}")
             return False
-
-    def open_keepalive(self, video_dev: str) -> bool:
-        """No-op: opening the device file-descriptor alone is not sufficient.
-
-        The MacroSilicon MS2109 only asserts HDMI Hot-Plug-Detect (HPD) while
-        the v4l2 device is actively *streaming* (VIDIOC_STREAMON called).
-        Simply opening the device file without streaming does not keep HPD
-        asserted.  The correct keepalive is the internal RTSP fakesink pipeline
-        started by RTSPServer._start_keepalive_pipeline().
-        """
-        return True
-
-    def close_keepalive(self) -> None:
-        """No-op: see open_keepalive()."""
 
     def _extract_usb_path_tail(self, device: str) -> Optional[str]:
         """Extract USB path tail for video device."""
@@ -600,16 +586,15 @@ class LocalDisplayPipeline:
 
     def __init__(
         self,
-        rtsp_url: str,
         debug_mode: bool = False,
         server=None,
         force_width: Optional[int] = None,
+        has_audio: bool = False,
     ):
-        self.rtsp_url = rtsp_url
         self.debug_mode = debug_mode
+        self.has_audio = has_audio
         self.pipeline = None
-        self.server = server  # Reference to RTSPServer for shutdown callback
-        # Used to match the correct window in wmctrl output.
+        self.server = server
         self.owner_pid = os.getpid()
         self.force_width = force_width
         
@@ -1334,194 +1319,106 @@ class LocalDisplayPipeline:
         # Ignore transient startup geometry (some WMs briefly report maximized/fullscreen).
         self._window_watch_ignore_until = time.time() + 5.0
 
+        stable_ticks = [0]
+
         def _tick() -> bool:
-            # Stop if pipeline is gone or we're shutting down.
+            self._window_watch_id = None
             if not self.pipeline:
-                self._window_watch_id = None
                 return False
 
+            delay_ms = 1000
             try:
-                # Cache window id once we can find it.
                 if not self._window_watch_window_id:
                     self._window_watch_window_id = self.get_window_id(timeout=0.2)
                     if not self._window_watch_window_id:
-                        return True  # keep retrying
+                        self._window_watch_id = GLib.timeout_add(delay_ms, _tick)
+                        return False
 
                 geometry = self.get_window_geometry(self._window_watch_window_id)
                 if not geometry:
-                    return True
+                    self._window_watch_id = GLib.timeout_add(delay_ms, _tick)
+                    return False
 
-                # Enforce a 16:9 window geometry: whenever the window becomes
-                # non-16:9, snap it back by adjusting the opposite dimension.
-                #
-                # We choose which dimension "drives" based on what changed most
-                # since the last tick (width vs height).
                 if time.time() >= self._window_watch_ignore_until:
                     m = re.match(r'^(\d+)x(\d+)([+-]\d+)([+-]\d+)$', geometry)
                     if m:
-                        w = int(m.group(1))
-                        h = int(m.group(2))
-
-                        # If we're in the middle of an adjustment we initiated,
-                        # don't react to intermediate transient sizes.
+                        w, h = int(m.group(1)), int(m.group(2))
                         if time.time() >= self._window_watch_adjusting_until:
-                            # Determine if geometry is sufficiently close to 16:9.
-                            # Use a small tolerance to avoid thrashing due to WM rounding.
-                            off = abs((w * 9) - (h * 16))
-                            if off > (16 * 2):  # ~2px height error tolerance
+                            if abs((w * 9) - (h * 16)) > 32:  # ~2px tolerance
                                 drive_width = True
                                 if self._window_watch_last_w is not None and self._window_watch_last_h is not None:
                                     drive_width = abs(w - self._window_watch_last_w) >= abs(h - self._window_watch_last_h)
-
                                 if drive_width:
-                                    target_w = _round_even(w)
-                                    target_h = _compute_height_for_16_9(target_w)
+                                    target_w, target_h = _round_even(w), _compute_height_for_16_9(w)
                                 else:
-                                    target_h = _round_even(h)
-                                    target_w = _compute_width_for_16_9(target_h)
-
+                                    target_h, target_w = _round_even(h), _compute_width_for_16_9(h)
                                 if abs(target_w - w) >= 2 or abs(target_h - h) >= 2:
-                                    self.log(f"Enforcing 16:9 window geometry: {target_w}x{target_h} (from {w}x{h})")
-                                    # Avoid re-entrancy for a short window while WM applies changes.
+                                    self.log(f"Enforcing 16:9: {target_w}x{target_h} (from {w}x{h})")
                                     self._window_watch_adjusting_until = time.time() + 2.0
-                                    self._apply_window_size_to_window(
-                                        self._window_watch_window_id,
-                                        target_w,
-                                        target_h,
-                                    )
-                                    # Re-sample on next tick after the WM applies.
-                                    return True
+                                    self._apply_window_size_to_window(self._window_watch_window_id, target_w, target_h)
+                                    stable_ticks[0] = 0
+                                    self._window_watch_id = GLib.timeout_add(1000, _tick)
+                                    return False
 
                 if geometry != self._window_watch_last_geometry:
                     self._window_watch_last_geometry = geometry
+                    stable_ticks[0] = 0
                     m = re.match(r'^(\d+)x(\d+)([+-]\d+)([+-]\d+)$', geometry)
                     if m:
                         self._window_watch_last_w = int(m.group(1))
                         self._window_watch_last_h = int(m.group(2))
-
-                    # Do not write the transient initial geometry.
-                    if time.time() < self._window_watch_ignore_until:
-                        return True
-
-                    try:
-                        self.window_state_file.parent.mkdir(parents=True, exist_ok=True)
-                        self.window_state_file.write_text(geometry)
-                        self.log(f"Window geometry saved: {geometry}")
-                    except OSError as e:
-                        self.log(f"Could not save window state: {e}")
+                    if time.time() >= self._window_watch_ignore_until:
+                        try:
+                            self.window_state_file.parent.mkdir(parents=True, exist_ok=True)
+                            self.window_state_file.write_text(geometry)
+                            self.log(f"Window geometry saved: {geometry}")
+                        except OSError as e:
+                            self.log(f"Could not save window state: {e}")
+                else:
+                    stable_ticks[0] += 1
+                    if stable_ticks[0] >= 5:
+                        delay_ms = 5000  # stable: back off subprocess polling
             except Exception as e:
-                # Best-effort; don't crash the pipeline for window tooling issues.
                 self.log(f"Window save error: {e}")
 
-            return True
+            self._window_watch_id = GLib.timeout_add(delay_ms, _tick)
+            return False
 
-        # Polling is acceptable here; window managers don't emit a reliable event
-        # stream we can subscribe to in this script, and this avoids extra threads.
-        self._window_watch_id = GLib.timeout_add_seconds(1, _tick)
+        self._window_watch_id = GLib.timeout_add(1000, _tick)
     
     def build_pipeline(self):
-        """Build local display pipeline as RTSP client.
-
-        We use `playbin` instead of manually wiring `rtspsrc` pads.
-        RTSP commonly exposes multiple RTP streams (audio + video), and
-        trying to feed those multiple pads into a single decodebin sink
-        can lead to `GST_PAD_LINK_WAS_LINKED` and “not-linked” failures.
-        """
-        playbin = Gst.ElementFactory.make("playbin", "playbin")
-        if not playbin:
-            raise RuntimeError("Failed to create playbin element")
-
-        def _on_source_setup(_playbin, source) -> None:
-            """Tune the local RTSP client to avoid noisy UDP startup warnings."""
-            try:
-                factory = source.get_factory()
-                factory_name = factory.get_name() if factory else ""
-            except Exception:
-                factory_name = ""
-
-            if factory_name != "rtspsrc":
-                return
-
-            try:
-                source.set_property("protocols", GstRtsp.RTSPLowerTrans.TCP)
-            except Exception:
-                pass
-            try:
-                source.set_property("latency", RTSP_LATENCY_MS)
-            except Exception:
-                pass
-
-        playbin.connect("source-setup", _on_source_setup)
-        playbin.set_property("uri", self.rtsp_url)
-
-        # Prefer explicit sinks so window behavior is stable.
-        #
-        # Also, build a small videosink bin that includes videoscale so the
-        # window can be resized freely. Without an explicit videoscale element,
-        # some setups end up effectively clamping the window width (you'll see
-        # height changes apply but width won't).
-        videoconvert = Gst.ElementFactory.make("videoconvert", "local_videoconvert")
-        videoscale = Gst.ElementFactory.make("videoscale", "local_videoscale")
-
-        # Prefer a sink that can scale to an arbitrarily-resized window without
-        # requiring caps that force a specific width/height.
-        #
-        # If we fall back to sinks that effectively clamp the window width to the
-        # negotiated frame width, WM-based resizing may not be able to shrink.
-        videosink = (
-            Gst.ElementFactory.make("glimagesink", "videosink") or
-            Gst.ElementFactory.make("xvimagesink", "videosink") or
-            Gst.ElementFactory.make("ximagesink", "videosink")
+        """Build local display pipeline consuming raw frames from the capture pipeline."""
+        sink_name = next(
+            (n for n in ("glimagesink", "xvimagesink", "ximagesink")
+             if Gst.ElementFactory.find(n)),
+            None,
         )
-        if not (videoconvert and videoscale and videosink):
-            raise RuntimeError("Failed to create local video sink elements")
-        if self.debug_mode:
-            try:
-                factory = videosink.get_factory()
-                sink_name = factory.get_name() if factory else type(videosink).__name__
-                self.log(f"Using local videosink: {sink_name}")
-            except Exception:
-                pass
+        if not sink_name:
+            raise RuntimeError("No suitable video sink (need glimagesink, xvimagesink, or ximagesink)")
+        self.log(f"Using local videosink: {sink_name}")
 
-        videosink.set_property("sync", False)
-        # Allow arbitrary resizing; don't enforce original aspect ratio in caps negotiation.
-        try:
-            videosink.set_property("force-aspect-ratio", False)
-        except Exception:
-            pass
+        video = (
+            f'intervideosrc channel=hdmi-local-v ! '
+            f'videoconvert ! videoscale ! '
+            f'{sink_name} name=videosink sync=false force-aspect-ratio=false'
+        )
+        audio = (
+            ' interaudiosrc channel=hdmi-local-a ! '
+            'audioconvert ! audioresample ! autoaudiosink sync=false'
+        ) if self.has_audio else ''
 
-        video_bin = Gst.Bin.new("local_videosink_bin")
-        video_bin.add(videoconvert)
-        video_bin.add(videoscale)
-        video_bin.add(videosink)
-        if not Gst.Element.link(videoconvert, videoscale) or not Gst.Element.link(videoscale, videosink):
-            raise RuntimeError("Failed to link local video sink bin elements")
-
-        # Expose a 'sink' pad on the bin so playbin can connect to it.
-        sink_pad = videoconvert.get_static_pad("sink")
-        if not sink_pad:
-            raise RuntimeError("Failed to get videoconvert sink pad for ghosting")
-        ghost_pad = Gst.GhostPad.new("sink", sink_pad)
-        video_bin.add_pad(ghost_pad)
-
-        audiosink = Gst.ElementFactory.make("autoaudiosink", "audiosink")
-        if not audiosink:
-            raise RuntimeError("Failed to create autoaudiosink for local display")
-        audiosink.set_property("sync", False)
-
-        playbin.set_property("video-sink", video_bin)
-        playbin.set_property("audio-sink", audiosink)
-
-        return playbin
+        pipeline = Gst.parse_launch(video + audio)
+        if not pipeline:
+            raise RuntimeError("Failed to create local display pipeline")
+        return pipeline
 
     def start(self) -> bool:
-        """Start the local display pipeline as RTSP client."""
-        # Restore window state before starting
+        """Start the local display pipeline."""
         self.restore_window_state()
         self._playing_init_done = False
-        
+
         if self.debug_mode:
-            print(f"[LOCAL] Building RTSP client pipeline for: {self.rtsp_url}")
+            print("[LOCAL] Building local display pipeline")
 
         try:
             self.pipeline = self.build_pipeline()
@@ -1617,68 +1514,112 @@ class LocalDisplayPipeline:
 class RTSPServer(GstRtspServer.RTSPServer):
     """RTSP Server for HDMI capture streaming."""
 
-    def _build_rtsp_launch_string(
-        self,
-        *,
-        video_device: Optional[str],
-        audio_device_spec: Optional[str],
-        use_mjpeg: bool,
-    ) -> str:
-        """Build a gst-rtsp-server `set_launch()` pipeline string.
-
-        Note: We intentionally use `set_launch()` (static pipeline) instead of a
-        dynamic `do_create_element()` implementation, because dynamic pipelines
-        in gst-rtsp-server are prone to per-client pipeline instantiation and
-        suspension quirks that can lead to v4l2 "Device is busy" and RTSP 503
-        failures when multiple clients connect (e.g., local preview + screenshot).
-        """
-
-        def _build_audio(device_spec: str, payload_name: str) -> str:
-            # Quote device spec because it may contain commas (e.g. dsnoop:CARD=1,DEV=0).
-            device_spec_q = device_spec.replace('"', '\\"')
+    def _pick_encoder(self) -> str:
+        """Return the best available H.264 encoder pipeline fragment (videoconvert → encoder)."""
+        if Gst.ElementFactory.find("vah264lpenc") and os.path.exists("/dev/dri/renderD128"):
+            print(f"[{timestamp()}] ✅ Using hardware encoder: vah264lpenc")
             return (
-                f'alsasrc device="{device_spec_q}" ! '
-                f'queue max-size-time=1000000000 ! '
+                f'videoconvert ! video/x-raw,format=NV12 ! '
+                f'vah264lpenc key-int-max={VIDEO_KEYFRAME_INTERVAL_FRAMES} '
+                f'qpi=26 qpp=28 target-usage=6'
+            )
+        if Gst.ElementFactory.find("vah264enc") and os.path.exists("/dev/dri/renderD128"):
+            print(f"[{timestamp()}] ✅ Using hardware encoder: vah264enc")
+            return (
+                f'videoconvert ! video/x-raw,format=NV12 ! '
+                f'vah264enc key-int-max={VIDEO_KEYFRAME_INTERVAL_FRAMES} '
+                f'qpi=26 qpp=28 target-usage=6'
+            )
+        return (
+            f'videoconvert ! video/x-raw,format=I420 ! '
+            f'x264enc tune=zerolatency key-int-max={VIDEO_KEYFRAME_INTERVAL_FRAMES} '
+            f'bitrate={VIDEO_BITRATE_KBPS} speed-preset=veryfast byte-stream=true threads=1'
+        )
+
+    def _build_rtsp_launch_string(self, *, has_audio: bool) -> str:
+        """Build the RTSP factory set_launch() string consuming inter* channels."""
+        encoder = self._pick_encoder()
+        video = (
+            f'intervideosrc channel=hdmi-rtsp-v ! '
+            f'{encoder} ! '
+            f'h264parse config-interval=1 ! '
+            f'video/x-h264,stream-format=avc,alignment=au ! '
+            f'rtph264pay config-interval=1 pt=96 name=pay0'
+        )
+        if has_audio:
+            audio = (
+                f' interaudiosrc channel=hdmi-rtsp-a ! '
                 f'audioconvert ! audioresample ! '
                 f'audio/x-raw,format=S16LE,rate={AUDIO_SAMPLE_RATE_HZ},channels=2 ! '
                 f'voaacenc bitrate={AUDIO_BITRATE_BPS} ! '
-                f'rtpmp4gpay pt=97 name={payload_name}'
+                f'rtpmp4gpay pt=97 name=pay1'
             )
+            return video + audio
+        return video
 
-        def _build_video() -> str:
-            if not video_device:
-                raise RuntimeError("No video device specified for RTSP launch")
+    def _start_capture_pipeline(
+        self,
+        video_device: str,
+        audio_device_spec: Optional[str],
+        use_mjpeg: bool,
+    ) -> None:
+        """Start the app-owned capture pipeline.
 
-            source = f'v4l2src device={video_device} do-timestamp=true ! '
+        Opens v4l2/ALSA exactly once, fans raw frames to inter* channels for the
+        RTSP factory and local display, and keeps VIDIOC_STREAMON active so HDMI
+        HPD stays asserted at all times (replacing the old keepalive RTSP client).
+        """
+        q = 'queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream'
+
+        if use_mjpeg:
             decoder = (
-                (
-                    'queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 '
-                    'leaky=downstream ! '
-                    f'image/jpeg,framerate={VIDEO_CAPTURE_FPS}/1 ! '
-                    'jpegdec ! '
-                )
-                if use_mjpeg
-                else (
-                    'queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 '
-                    'leaky=downstream ! decodebin ! '
-                )
+                f'{q} ! image/jpeg,framerate={VIDEO_CAPTURE_FPS}/1 ! jpegdec ! '
             )
-            encoder = (
-                f'queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 '
-                f'leaky=downstream ! videoconvert ! video/x-raw,format=I420 ! '
-                f'x264enc tune=zerolatency key-int-max={VIDEO_KEYFRAME_INTERVAL_FRAMES} '
-                f'bitrate={VIDEO_BITRATE_KBPS} speed-preset=veryfast '
-                f'byte-stream=true threads=1 ! '
-                f'h264parse config-interval=1 ! '
-                f'video/x-h264,stream-format=avc,alignment=au ! '
-                f'rtph264pay config-interval=1 pt=96 name=pay0'
-            )
-            return source + decoder + encoder
+        else:
+            decoder = f'{q} ! decodebin ! '
 
-        video_pipeline = _build_video()
+        video = (
+            f'v4l2src device={video_device} do-timestamp=true ! '
+            f'{decoder}'
+            f'videoconvert ! tee name=vtee '
+            f'vtee. ! {q} ! intervideosink channel=hdmi-rtsp-v '
+            f'vtee. ! {q} ! intervideosink channel=hdmi-local-v'
+        )
+
         if audio_device_spec:
-            return f'{video_pipeline} {_build_audio(audio_device_spec, "pay1")}'
-        return video_pipeline
+            device_q = audio_device_spec.replace('"', '\\"')
+            audio = (
+                f' alsasrc device="{device_q}" ! '
+                f'queue max-size-time=1000000000 ! audioconvert ! audioresample ! tee name=atee '
+                f'atee. ! queue ! interaudiosink channel=hdmi-rtsp-a '
+                f'atee. ! queue ! interaudiosink channel=hdmi-local-a'
+            )
+        else:
+            audio = ''
+
+        pipeline_str = video + audio
+        if self.debug_mode:
+            print(f"[INFO] Capture pipeline: {pipeline_str}")
+
+        pipeline = Gst.parse_launch(pipeline_str)
+        if not pipeline:
+            raise RuntimeError("Failed to create capture pipeline")
+
+        bus = pipeline.get_bus()
+        if bus:
+            bus.add_signal_watch()
+            bus.connect("message", self._on_media_bus_message)
+
+        ret = pipeline.set_state(Gst.State.PLAYING)
+        if ret == Gst.StateChangeReturn.FAILURE:
+            raise RuntimeError("Capture pipeline failed to start")
+        if ret == Gst.StateChangeReturn.ASYNC:
+            ret, _, _ = pipeline.get_state(3 * Gst.SECOND)
+            if ret == Gst.StateChangeReturn.FAILURE:
+                raise RuntimeError("Capture pipeline failed to reach PLAYING state")
+
+        self._capture_pipeline = pipeline
+        print(f"[{timestamp()}] ✅ Capture pipeline started (HDMI HPD asserted)")
 
     def _on_media_configure(self, _factory, media) -> None:
         """Attach bus monitoring to each created media pipeline."""
@@ -1764,9 +1705,7 @@ class RTSPServer(GstRtspServer.RTSPServer):
         self.audio_device_spec: Optional[str] = None
         self.set_address("0.0.0.0")
         self.set_service(self.port)
-        self._keepalive_pipeline = None  # Internal RTSP client keeping v4l2 streaming
-        
-        # Register cleanup function for robust cleanup
+        self._capture_pipeline = None
         register_cleanup(self.shutdown)
 
         # Detect HDMI devices with enhanced validation
@@ -1794,37 +1733,35 @@ class RTSPServer(GstRtspServer.RTSPServer):
             else:
                 print(f"[{timestamp()}] ⚠️  No audio device found - video only")
 
-        # Determine if we need local display (as RTSP client)
         use_local_display = not self.headless and video_device
-        rtsp_url = f"rtsp://127.0.0.1:{self.port}{self.endpoint}"
-
-        # Create and configure factory first (server must be ready before client connects)
-        # Use a static `set_launch()` factory so gst-rtsp-server can properly
-        # share a single capture pipeline across multiple RTSP clients.
-        self.factory = GstRtspServer.RTSPMediaFactory()
-        self.factory.set_shared(True)
-        if hasattr(self.factory, "set_reusable"):
-            self.factory.set_reusable(True)
 
         use_mjpeg = False
         if video_device:
             try:
-                # Check if the video device supports MJPEG format.
                 result = subprocess.run(
                     ['v4l2-ctl', '-d', video_device, '--list-formats-ext'],
-                    capture_output=True,
-                    text=True,
-                    timeout=SUBPROCESS_TIMEOUT_SECONDS,
+                    capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_SECONDS,
                 )
                 use_mjpeg = ('MJPG' in result.stdout) or ('MJPEG' in result.stdout)
             except Exception:
                 use_mjpeg = True
 
-        launch = self._build_rtsp_launch_string(
+        # Start the app-owned capture pipeline; fans raw frames via inter* channels
+        # and keeps VIDIOC_STREAMON / HDMI HPD asserted for the server's lifetime.
+        self._start_capture_pipeline(
             video_device=video_device,
             audio_device_spec=self.audio_device_spec if audio_card else None,
             use_mjpeg=use_mjpeg,
         )
+
+        # RTSP factory reads from intervideosrc/interaudiosrc (not v4l2/alsa directly)
+        # so multiple RTSP clients never contend on the device.
+        self.factory = GstRtspServer.RTSPMediaFactory()
+        self.factory.set_shared(True)
+        if hasattr(self.factory, "set_reusable"):
+            self.factory.set_reusable(True)
+
+        launch = self._build_rtsp_launch_string(has_audio=bool(audio_card))
         self.factory.set_launch(launch)
         self.factory.connect("media-configure", self._on_media_configure)
 
@@ -1855,98 +1792,17 @@ class RTSPServer(GstRtspServer.RTSPServer):
         if self.headless:
             print(f"[{timestamp()}] 🚫 Headless mode: local display disabled")
         
-        # Start local display as RTSP client after server is ready
         if use_local_display:
-            # Wait longer for server to be fully ready and accept connections
-            # The server needs time to bind to the port and be ready
-            print(f"[{timestamp()}] 🖥️  Waiting for RTSP server to be ready...")
-            time.sleep(3)  # Increased wait time for server to be fully ready
-            print(f"[{timestamp()}] 🖥️  Starting local display as RTSP client...")
+            print(f"[{timestamp()}] 🖥️  Starting local display...")
             self.local_display = LocalDisplayPipeline(
-                rtsp_url=rtsp_url,
                 debug_mode=debug_mode,
-                server=self,  # Pass server reference for shutdown callback
+                server=self,
                 force_width=self.viewer_width,
+                has_audio=bool(audio_card),
             )
             if not self.local_display.start():
-                print(f"[{timestamp()}] ⚠️  Local display failed to start, "
-                      f"continuing with RTSP server only")
+                print(f"[{timestamp()}] ⚠️  Local display failed to start, continuing with RTSP server only")
                 self.local_display = None
-        else:
-            # In headless mode there is no local display to keep the v4l2
-            # pipeline alive between external client sessions.  Start an
-            # internal keepalive client that holds the pipeline running so
-            # STREAMON stays active and HDMI HPD is continuously asserted.
-            print(f"[{timestamp()}] 🖥️  Waiting for RTSP server to be ready...")
-            time.sleep(2)
-            self._start_keepalive_pipeline(rtsp_url)
-
-    def _start_keepalive_pipeline(self, rtsp_url: str) -> None:
-        """Start a silent internal RTSP client to keep the v4l2 pipeline streaming.
-
-        The GStreamer RTSP server only starts the v4l2 capture pipeline (and
-        thus VIDIOC_STREAMON) when the first external client connects.  Between
-        client sessions the pipeline stops, the v4l2 device closes, and the
-        MS2109 de-asserts HDMI HPD — causing the HDMI source (e.g. Amlogic) to
-        disable its transmitter and produce a black screen on reconnect.
-
-        This internal fakesink client starts immediately on server startup and
-        stays connected for the server's lifetime, keeping STREAMON active and
-        HPD asserted at all times regardless of external client activity.
-        """
-        try:
-            playbin = Gst.ElementFactory.make("playbin", "keepalive_playbin")
-            if not playbin:
-                print(f"[{timestamp()}] ⚠️  Could not create keepalive pipeline element")
-                return
-
-            fakevideo = Gst.ElementFactory.make("fakesink", "keepalive_video")
-            fakeaudio = Gst.ElementFactory.make("fakesink", "keepalive_audio")
-            for sink in (fakevideo, fakeaudio):
-                if sink:
-                    sink.set_property("sync", False)
-                    sink.set_property("silent", True)
-
-            playbin.set_property("uri", rtsp_url)
-            if fakevideo:
-                playbin.set_property("video-sink", fakevideo)
-            if fakeaudio:
-                playbin.set_property("audio-sink", fakeaudio)
-
-            def _on_source_setup(_playbin, source):
-                try:
-                    factory = source.get_factory()
-                    if factory and factory.get_name() == "rtspsrc":
-                        source.set_property("protocols", GstRtsp.RTSPLowerTrans.TCP)
-                        source.set_property("latency", RTSP_LATENCY_MS)
-                except Exception:
-                    pass
-
-            playbin.connect("source-setup", _on_source_setup)
-
-            ret = playbin.set_state(Gst.State.PLAYING)
-            if ret == Gst.StateChangeReturn.FAILURE:
-                print(f"[{timestamp()}] ⚠️  Keepalive pipeline failed to start")
-                return
-
-            bus = playbin.get_bus()
-            if bus:
-                bus.add_signal_watch()
-                def _on_keepalive_bus_message(_bus, message):
-                    if message.type == Gst.MessageType.ERROR:
-                        err, debug_info = message.parse_error()
-                        error_msg = err.message
-                        if debug_info:
-                            error_msg = f"{error_msg} ({debug_info})"
-                        print(f"❌ GStreamer keepalive pipeline ERROR: {error_msg}")
-                        self.on_pipeline_error(error_msg)
-                    return True
-                bus.connect("message", _on_keepalive_bus_message)
-
-            self._keepalive_pipeline = playbin
-            print(f"[{timestamp()}] 🔗 Keepalive pipeline started (HDMI HPD will stay asserted)")
-        except Exception as e:
-            print(f"[{timestamp()}] ⚠️  Could not start keepalive pipeline: {e}")
 
     def on_client_connected(self, server, client):
         """Handle client connection."""
@@ -1986,18 +1842,16 @@ class RTSPServer(GstRtspServer.RTSPServer):
                 self.local_display.stop()
                 self.local_display = None
 
-            if self._keepalive_pipeline:
-                bus = self._keepalive_pipeline.get_bus()
-                if bus:
-                    bus.remove_signal_watch()
-                self._keepalive_pipeline.set_state(Gst.State.NULL)
-                self._keepalive_pipeline = None
+            if getattr(self, '_capture_pipeline', None):
+                try:
+                    bus = self._capture_pipeline.get_bus()
+                    if bus:
+                        bus.remove_signal_watch()
+                    self._capture_pipeline.set_state(Gst.State.NULL)
+                except Exception:
+                    pass
+                self._capture_pipeline = None
 
-            # Release keepalive fd last so HPD stays asserted as long as possible
-            if self.detector:
-                self.detector.close_keepalive()
-
-            # Quit the main loop to exit gracefully
             if self.main_loop:
                 GLib.idle_add(self.main_loop.quit)
         except Exception as e:
@@ -2026,9 +1880,9 @@ DESCRIPTION:
     
     By default, displays a local preview window showing the captured audio
     and video. The window position and size are automatically saved and
-    restored between sessions. The video source is shared between the local
-    display and RTSP clients using intervideosink/src. Use --headless to
-    disable the local display (RTSP server will access the device directly).
+    restored between sessions. The device is opened once in an app-owned
+    capture pipeline which fans raw frames to the local display and RTSP
+    clients via inter* channels. Use --headless to disable the local display.
 
     Default RTSP URL: rtsp://0.0.0.0:1234/hdmi
 

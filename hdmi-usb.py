@@ -1386,6 +1386,20 @@ class LocalDisplayPipeline:
 
         self._window_watch_id = GLib.timeout_add(1000, _tick)
     
+    def _pick_audio_output_sink(self) -> str:
+        """Return a GStreamer audio sink element string for local playback.
+
+        pulsesink (used by PulseAudio and PipeWire's PulseAudio layer) needs
+        explicit buffer-time / latency-time; without them the tiny default
+        buffers cause underruns and silence.  autoaudiosink does not forward
+        those properties to its child sink, so we prefer pulsesink directly.
+        """
+        if Gst.ElementFactory.find("pulsesink"):
+            self.log("Using pulsesink for local audio output")
+            return "pulsesink buffer-time=200000 latency-time=100000"
+        self.log("pulsesink not found, falling back to autoaudiosink")
+        return "autoaudiosink sync=false"
+
     def build_pipeline(self):
         """Build local display pipeline consuming raw frames from the capture pipeline."""
         sink_name = next(
@@ -1403,8 +1417,8 @@ class LocalDisplayPipeline:
             f'{sink_name} name=videosink sync=false force-aspect-ratio=false'
         )
         audio = (
-            ' interaudiosrc channel=hdmi-local-a ! '
-            'audioconvert ! audioresample ! autoaudiosink sync=false'
+            f' interaudiosrc channel=hdmi-local-a ! '
+            f'audioconvert ! audioresample ! {self._pick_audio_output_sink()}'
         ) if self.has_audio else ''
 
         pipeline = Gst.parse_launch(video + audio)

@@ -1344,7 +1344,12 @@ class LocalDisplayPipeline:
                     if m:
                         w, h = int(m.group(1)), int(m.group(2))
                         if time.time() >= self._window_watch_adjusting_until:
-                            if abs((w * 9) - (h * 16)) > 32:  # ~2px tolerance
+                            # Only enforce 16:9 once the geometry is stable across
+                            # two ticks; enforcing on a freshly-read value races
+                            # with concurrent external resizes (the read is ~1s
+                            # stale by the time the resize is applied).
+                            if (geometry == self._window_watch_last_geometry and
+                                    abs((w * 9) - (h * 16)) > 32):  # ~2px tolerance
                                 drive_width = True
                                 if self._window_watch_last_w is not None and self._window_watch_last_h is not None:
                                     drive_width = abs(w - self._window_watch_last_w) >= abs(h - self._window_watch_last_h)
@@ -1353,12 +1358,20 @@ class LocalDisplayPipeline:
                                 else:
                                     target_h, target_w = _round_even(h), _compute_width_for_16_9(h)
                                 if abs(target_w - w) >= 2 or abs(target_h - h) >= 2:
-                                    self.log(f"Enforcing 16:9: {target_w}x{target_h} (from {w}x{h})")
-                                    self._window_watch_adjusting_until = time.time() + 2.0
-                                    self._apply_window_size_to_window(self._window_watch_window_id, target_w, target_h)
-                                    stable_ticks[0] = 0
-                                    self._window_watch_id = GLib.timeout_add(1000, _tick)
-                                    return False
+                                    # Re-read right before applying: an external
+                                    # resize (user/wmctrl) may have landed since
+                                    # this tick's read, and applying a target
+                                    # computed from the stale value would stomp it.
+                                    fresh = self.get_window_geometry(self._window_watch_window_id)
+                                    if fresh != geometry:
+                                        geometry = fresh or geometry
+                                    else:
+                                        self.log(f"Enforcing 16:9: {target_w}x{target_h} (from {w}x{h})")
+                                        self._window_watch_adjusting_until = time.time() + 2.0
+                                        self._apply_window_size_to_window(self._window_watch_window_id, target_w, target_h)
+                                        stable_ticks[0] = 0
+                                        self._window_watch_id = GLib.timeout_add(1000, _tick)
+                                        return False
 
                 if geometry != self._window_watch_last_geometry:
                     self._window_watch_last_geometry = geometry
@@ -1586,9 +1599,31 @@ class RTSPServer(GstRtspServer.RTSPServer):
         q = 'queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream'
 
         if use_mjpeg:
-            decoder = (
-                f'{q} ! image/jpeg,framerate={VIDEO_CAPTURE_FPS}/1 ! jpegdec ! '
-            )
+            if (Gst.ElementFactory.find("vajpegdec")
+                    and Gst.ElementFactory.find("vapostproc")
+                    and os.path.exists("/dev/dri/renderD128")):
+                # vajpegdec (GStreamer 1.24) only negotiates when the JPEG caps
+                # carry explicit sof-marker/colorspace/sampling/interlace-mode
+                # fields, which neither v4l2src nor jpegparse provide. The
+                # decoder parses the real bitstream, so these values are
+                # negotiation hints only — a sampling mismatch still decodes
+                # correctly (verified empirically).
+                #
+                # vapostproc converts the decoder's native 4:2:2 output to I420
+                # on the GPU before download; letting videoconvert do it on the
+                # CPU costs more than software jpegdec. I420 also matches
+                # jpegdec's output so downstream branches behave identically.
+                print(f"[{timestamp()}] ✅ Using hardware JPEG decoder: vajpegdec")
+                decoder = (
+                    f'{q} ! image/jpeg,framerate={VIDEO_CAPTURE_FPS}/1,'
+                    f'sof-marker=0,colorspace=sYUV,sampling=YCbCr-4:2:2,'
+                    f'interlace-mode=progressive ! vajpegdec ! '
+                    f'vapostproc ! video/x-raw,format=I420 ! '
+                )
+            else:
+                decoder = (
+                    f'{q} ! image/jpeg,framerate={VIDEO_CAPTURE_FPS}/1 ! jpegdec ! '
+                )
         else:
             decoder = f'{q} ! decodebin ! '
 

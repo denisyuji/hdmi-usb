@@ -23,6 +23,7 @@ Unified HDMI USB RTSP server (and local preview).
   - Serves RTSP at `rtsp://0.0.0.0:1234/hdmi` (default).
   - Uses a **static `RTSPMediaFactory.set_launch()` pipeline** so multiple RTSP clients don’t trigger multiple `v4l2src` opens (prevents `Device is busy` / RTSP `503` issues).
   - **Video path (non-MJPEG)**: **`queue max-size-buffers=2 max-size-time=0 leaky=downstream ! decodebin !`** before encoding so the H.264 stream tracks **live** HDMI with minimal backlog (restart server after code updates).
+  - **Video path (MJPEG)**: prefers hardware **`vajpegdec ! vapostproc ! I420`** (VA-API) when available (`/dev/dri/renderD128`), falling back to software `jpegdec`. The caps filter must carry explicit `sof-marker`/`colorspace`/`sampling`/`interlace-mode` fields for `vajpegdec` to negotiate; the decoder parses the real bitstream, so mismatched hint values still decode correctly. `vapostproc` converts the decoder's native 4:2:2 output to I420 on the GPU — letting `videoconvert` do it on the CPU costs more than software `jpegdec`.
 - **Local preview**:
   - By default, the local preview is an **RTSP client** (`playbin`) connecting to the local server.
   - Window geometry is saved/restored and the window is kept at 16:9.

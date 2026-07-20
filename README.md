@@ -2,9 +2,17 @@
 
 Scripts to detect and preview using cheap USB HDMI capture devices using GStreamer. Tested with MacroSilicon-based devices. You can either run a **live preview** locally on the machine connected to the capture device over USB, or run an **RTSP server** to stream the capture over the network (optionally with a local preview).
 
+<p align="center">
+  <img src="hdmi-usb-ubuntu.png" alt="hdmi-usb on Ubuntu" width="480"><br>
+  <em>hdmi-usb on Ubuntu</em>
+</p>
+
 **AI Agent Integration**: The **`hdmi-usb-screenshot-mcp`** helper runs an **[MCP](https://modelcontextprotocol.io/) server** on stdio while the RTSP stream is up; agents call **`get_last_frame`** to receive a **current** HDMI view as a 640×360 PNG (base64). Each tool call runs a short **`gst-launch-1.0 uridecodebin`** burst and returns the newest PNG from that burst so the image tracks the live screen.
 
-![Tested on a cheap HDMI capture card](cheap-hdmi-usb.webp)
+<p align="center">
+  <img src="cheap-hdmi-usb.webp" alt="unexpensive Generic HDMI-USB capture card" width="480"><br>
+  <em>unexpensive Generic HDMI-USB capture card</em>
+</p>
 
 ## Features
 

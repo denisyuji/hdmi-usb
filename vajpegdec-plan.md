@@ -44,6 +44,12 @@ software if it fails to reach PLAYING, or if it posts an error within
 `⚠️  Hardware decode failed (…), retrying with software jpegdec`). Past that
 window the "any pipeline error terminates" policy applies unchanged.
 
+`GST_RESOURCE_ERROR` failures (device busy, missing, unopenable) are not
+retried: the decoder is not the problem, so the software attempt would fail
+the same way. They abort immediately, carrying the bus error text
+(`Cannot identify device '/dev/video99'.`) instead of the bare state-change
+message.
+
 A second, related fix went into the local-display window watcher: the 16:9
 enforcement now re-reads the window geometry immediately before applying,
 because applying a target computed from a ~1s-stale read races with

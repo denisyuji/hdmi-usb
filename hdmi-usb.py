@@ -1682,8 +1682,17 @@ class RTSPServer(GstRtspServer.RTSPServer):
                 failure = "Capture pipeline failed to reach PLAYING state"
 
         if failure:
+            # The state-change return says nothing about the cause; the real
+            # reason is the queued bus error (the main loop is not running yet,
+            # so the signal watch has not consumed it).
+            err = None
+            if bus:
+                error_msg = bus.timed_pop_filtered(0, Gst.MessageType.ERROR)
+                if error_msg:
+                    err, _ = error_msg.parse_error()
+                    failure = f"{failure}: {err.message}"
             self._teardown_capture_pipeline(pipeline)
-            if not using_hw_decode:
+            if not using_hw_decode or self._is_device_error(err):
                 raise RuntimeError(failure)
             print(f"[{timestamp()}] ⚠️  {failure} with hardware decode, "
                   f"retrying with software jpegdec")
@@ -1716,6 +1725,22 @@ class RTSPServer(GstRtspServer.RTSPServer):
         except Exception:
             pass
 
+    def _is_device_error(self, err) -> bool:
+        """True if err is a capture-device problem (busy, missing, unopenable).
+
+        Such a failure has nothing to do with the decoder, so downgrading to
+        software would fail identically — report the real error instead.
+        """
+        if err is None:
+            return False
+        domain = Gst.ResourceError.quark()
+        return any(err.matches(domain, code) for code in (
+            Gst.ResourceError.BUSY,
+            Gst.ResourceError.OPEN_READ,
+            Gst.ResourceError.OPEN_READ_WRITE,
+            Gst.ResourceError.NOT_FOUND,
+        ))
+
     def _end_hw_decode_probation(self) -> bool:
         """Stop treating capture errors as hardware-decode failures."""
         self._hw_decode_on_probation = False
@@ -1726,12 +1751,13 @@ class RTSPServer(GstRtspServer.RTSPServer):
         when hardware decode fails inside its probation window."""
         if (message.type == Gst.MessageType.ERROR
                 and getattr(self, '_hw_decode_on_probation', False)):
-            self._hw_decode_on_probation = False
             err, _ = message.parse_error()
-            print(f"[{timestamp()}] ⚠️  Hardware decode failed ({err.message}), "
-                  f"retrying with software jpegdec")
-            GLib.idle_add(self._restart_capture_in_software)
-            return True
+            if not self._is_device_error(err):
+                self._hw_decode_on_probation = False
+                print(f"[{timestamp()}] ⚠️  Hardware decode failed ({err.message}), "
+                      f"retrying with software jpegdec")
+                GLib.idle_add(self._restart_capture_in_software)
+                return True
 
         return self._on_media_bus_message(bus, message)
 

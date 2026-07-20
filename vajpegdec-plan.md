@@ -37,6 +37,13 @@ vajpegdec ! vapostproc ! video/x-raw,format=I420 ! videoconvert ! tee …
 Startup logs `✅ Using hardware JPEG decoder: vajpegdec` when the hardware
 path is taken.
 
+Because the element/device guard only proves the *elements* exist, not that
+the VA-API driver works, the hardware pipeline is also retried once in
+software if it fails to reach PLAYING, or if it posts an error within
+`HW_DECODE_PROBATION_SECONDS` of reaching it (logged as
+`⚠️  Hardware decode failed (…), retrying with software jpegdec`). Past that
+window the "any pipeline error terminates" policy applies unchanged.
+
 A second, related fix went into the local-display window watcher: the 16:9
 enforcement now re-reads the window geometry immediately before applying,
 because applying a target computed from a ~1s-stale read races with

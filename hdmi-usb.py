@@ -55,6 +55,9 @@ AUDIO_BITRATE_BPS = 128000
 VIDEO_BITRATE_KBPS = 3000
 VIDEO_KEYFRAME_INTERVAL_FRAMES = 30
 VIDEO_CAPTURE_FPS = 25
+# Window after the hardware-decode capture pipeline reaches PLAYING during which
+# a pipeline error is treated as a hardware failure and retried in software.
+HW_DECODE_PROBATION_SECONDS = 10
 
 
 def _round_even(value: int) -> int:
@@ -1589,19 +1592,29 @@ class RTSPServer(GstRtspServer.RTSPServer):
         video_device: str,
         audio_device_spec: Optional[str],
         use_mjpeg: bool,
+        force_software_decode: bool = False,
     ) -> None:
         """Start the app-owned capture pipeline.
 
         Opens v4l2/ALSA exactly once, fans raw frames to inter* channels for the
         RTSP factory and local display, and keeps VIDIOC_STREAMON active so HDMI
         HPD stays asserted at all times (replacing the old keepalive RTSP client).
+
+        Element presence does not guarantee a working VA-API driver, so a
+        hardware-decode pipeline that fails to start — or that errors out during
+        its probation window — is retried once with the software decoder via
+        force_software_decode.
         """
+        self._capture_args = (video_device, audio_device_spec, use_mjpeg)
         q = 'queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream'
 
+        using_hw_decode = False
         if use_mjpeg:
-            if (Gst.ElementFactory.find("vajpegdec")
+            if (not force_software_decode
+                    and Gst.ElementFactory.find("vajpegdec")
                     and Gst.ElementFactory.find("vapostproc")
                     and os.path.exists("/dev/dri/renderD128")):
+                using_hw_decode = True
                 # vajpegdec (GStreamer 1.24) only negotiates when the JPEG caps
                 # carry explicit sof-marker/colorspace/sampling/interlace-mode
                 # fields, which neither v4l2src nor jpegparse provide. The
@@ -1657,18 +1670,88 @@ class RTSPServer(GstRtspServer.RTSPServer):
         bus = pipeline.get_bus()
         if bus:
             bus.add_signal_watch()
-            bus.connect("message", self._on_media_bus_message)
+            bus.connect("message", self._on_capture_bus_message)
 
+        failure = None
         ret = pipeline.set_state(Gst.State.PLAYING)
         if ret == Gst.StateChangeReturn.FAILURE:
-            raise RuntimeError("Capture pipeline failed to start")
-        if ret == Gst.StateChangeReturn.ASYNC:
+            failure = "Capture pipeline failed to start"
+        elif ret == Gst.StateChangeReturn.ASYNC:
             ret, _, _ = pipeline.get_state(3 * Gst.SECOND)
             if ret == Gst.StateChangeReturn.FAILURE:
-                raise RuntimeError("Capture pipeline failed to reach PLAYING state")
+                failure = "Capture pipeline failed to reach PLAYING state"
+
+        if failure:
+            self._teardown_capture_pipeline(pipeline)
+            if not using_hw_decode:
+                raise RuntimeError(failure)
+            print(f"[{timestamp()}] ⚠️  {failure} with hardware decode, "
+                  f"retrying with software jpegdec")
+            self._start_capture_pipeline(
+                video_device=video_device,
+                audio_device_spec=audio_device_spec,
+                use_mjpeg=use_mjpeg,
+                force_software_decode=True,
+            )
+            return
 
         self._capture_pipeline = pipeline
+        # A broken VA-API driver can also fail asynchronously, after PLAYING.
+        # Stay open to one software retry for a short probation window; past it,
+        # errors are real capture failures and terminate the app as usual.
+        self._hw_decode_on_probation = using_hw_decode
+        if using_hw_decode:
+            GLib.timeout_add_seconds(
+                HW_DECODE_PROBATION_SECONDS, self._end_hw_decode_probation
+            )
         print(f"[{timestamp()}] ✅ Capture pipeline started (HDMI HPD asserted)")
+
+    def _teardown_capture_pipeline(self, pipeline) -> None:
+        """Detach the bus watch and return a capture pipeline to NULL."""
+        try:
+            bus = pipeline.get_bus()
+            if bus:
+                bus.remove_signal_watch()
+            pipeline.set_state(Gst.State.NULL)
+        except Exception:
+            pass
+
+    def _end_hw_decode_probation(self) -> bool:
+        """Stop treating capture errors as hardware-decode failures."""
+        self._hw_decode_on_probation = False
+        return False
+
+    def _on_capture_bus_message(self, bus, message) -> bool:
+        """Handle capture pipeline messages, downgrading to software decode
+        when hardware decode fails inside its probation window."""
+        if (message.type == Gst.MessageType.ERROR
+                and getattr(self, '_hw_decode_on_probation', False)):
+            self._hw_decode_on_probation = False
+            err, _ = message.parse_error()
+            print(f"[{timestamp()}] ⚠️  Hardware decode failed ({err.message}), "
+                  f"retrying with software jpegdec")
+            GLib.idle_add(self._restart_capture_in_software)
+            return True
+
+        return self._on_media_bus_message(bus, message)
+
+    def _restart_capture_in_software(self) -> bool:
+        """Replace the hardware-decode capture pipeline with a software one."""
+        if self._capture_pipeline:
+            self._teardown_capture_pipeline(self._capture_pipeline)
+            self._capture_pipeline = None
+
+        video_device, audio_device_spec, use_mjpeg = self._capture_args
+        try:
+            self._start_capture_pipeline(
+                video_device=video_device,
+                audio_device_spec=audio_device_spec,
+                use_mjpeg=use_mjpeg,
+                force_software_decode=True,
+            )
+        except Exception as e:
+            self.on_pipeline_error(f"Software decode retry failed: {e}")
+        return False
 
     def _on_media_configure(self, _factory, media) -> None:
         """Attach bus monitoring to each created media pipeline."""
@@ -1755,6 +1838,8 @@ class RTSPServer(GstRtspServer.RTSPServer):
         self.set_address("0.0.0.0")
         self.set_service(self.port)
         self._capture_pipeline = None
+        self._capture_args = None
+        self._hw_decode_on_probation = False
         register_cleanup(self.shutdown)
 
         # Detect HDMI devices with enhanced validation

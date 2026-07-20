@@ -6,6 +6,7 @@
 # - Local preview window can be moved/resized
 # - Window geometry is saved and restored across restarts
 # - test_hdmi_usb_screenshot_mcp.py exercises MCP against the running server
+# - Software fallback: server streams with the hardware plugins hidden
 #
 # Notes:
 # - Window tests require an X11 session with DISPLAY set and tools: wmctrl, xwininfo.
@@ -141,6 +142,38 @@ start_server_bg_headless() {
   python3 -u "${HDMI_USB_PY}" --debug --headless >>"$LOG_FILE" 2>&1 &
   SERVER_PID="$!"
   info "Server pid=$SERVER_PID log=$LOG_FILE"
+}
+
+# Build a GStreamer plugin directory that symlinks every system plugin except
+# the hardware-acceleration ones, so a server started against it is forced down
+# the software decode/encode path without touching the real installation.
+make_software_only_plugin_dir() {
+  local dir="$1" plugin_dir f b
+  plugin_dir="$(pkg-config --variable=pluginsdir gstreamer-1.0 2>/dev/null || true)"
+  [[ -n "$plugin_dir" && -d "$plugin_dir" ]] || return 1
+
+  rm -rf "$dir"
+  mkdir -p "$dir"
+  for f in "$plugin_dir"/*.so; do
+    [[ -e "$f" ]] || continue
+    b="$(basename "$f")"
+    case "$b" in
+      libgstva.so|libgstvaapi.so|libgstnvcodec.so) continue ;;
+    esac
+    ln -sf "$f" "$dir/$b"
+  done
+
+  # Without the software JPEG/H.264 elements the test would prove nothing.
+  [[ -e "$dir/libgstjpeg.so" && -e "$dir/libgstx264.so" ]] || return 1
+}
+
+start_server_bg_software_only() {
+  local plugin_dir="$1" log_file="$2"
+  info "Starting server in background (headless, hardware plugins hidden)"
+  GST_PLUGIN_SYSTEM_PATH="$plugin_dir" GST_REGISTRY="${plugin_dir}/registry.bin" \
+    python3 -u "${HDMI_USB_PY}" --debug --headless >>"$log_file" 2>&1 &
+  SERVER_PID="$!"
+  info "Server pid=$SERVER_PID log=$log_file"
 }
 
 parse_rtsp_host_port() {
@@ -450,6 +483,54 @@ PY
     fi
   else
     mark_skip "Headless: start server + MCP test (skipped)"
+  fi
+
+  # --- Software fallback (machine without hardware acceleration) ---
+  #
+  # Runs the server against a plugin directory with the VA-API/NVIDIA plugins
+  # removed, so the decoder/encoder/sink selection has to fall back to software.
+  if [[ "$goto_summary" != "true" ]]; then
+    info "Running software fallback test (no hardware acceleration plugins)"
+    kill_server "$SERVER_PID"
+    SERVER_PID=""
+    sleep 2
+
+    local sw_plugin_dir="${TEST_LOG_DIR}/sw-plugins-${TS}"
+    local sw_log="${TEST_LOG_DIR}/integration_${TS}_software.log"
+    if ! make_software_only_plugin_dir "$sw_plugin_dir"; then
+      mark_skip "Software fallback: build plugin dir without hardware plugins"
+    else
+      start_server_bg_software_only "$sw_plugin_dir" "$sw_log"
+      if wait_for_tcp "$RTSP_HOST" "$RTSP_PORT"; then
+        mark_pass "Software fallback: RTSP server creation (${RTSP_HOST}:${RTSP_PORT})"
+      else
+        mark_fail "Software fallback: RTSP server creation (${RTSP_HOST}:${RTSP_PORT})"
+      fi
+
+      # The point of the test: no hardware element may have been selected.
+      if grep -q "Using hardware" "$sw_log" 2>/dev/null; then
+        info "Unexpected hardware element in $sw_log: $(grep -m1 'Using hardware' "$sw_log")"
+        mark_fail "Software fallback: no hardware elements selected"
+      else
+        mark_pass "Software fallback: no hardware elements selected"
+      fi
+
+      local sw_mcp_out
+      set +e
+      sw_mcp_out="$(timeout "$SCREENSHOT_TIMEOUT_SECONDS" python3 "${ROOT_DIR}/test_hdmi_usb_screenshot_mcp.py" --rtsp-url "$RTSP_URL" --frame-wait "$SCREENSHOT_TIMEOUT_SECONDS" 2>&1)"
+      local sw_mcp_rc=$?
+      set -e
+      echo "$sw_mcp_out" >>"$LOG_FILE"
+      if [[ "$sw_mcp_rc" != "0" ]]; then
+        mark_fail "Software fallback: test_hdmi_usb_screenshot_mcp.py"
+      else
+        mark_pass "Software fallback: test_hdmi_usb_screenshot_mcp.py"
+      fi
+
+      rm -rf "$sw_plugin_dir"
+    fi
+  else
+    mark_skip "Software fallback: start server + MCP test (skipped)"
   fi
 
   # --- Summary ---

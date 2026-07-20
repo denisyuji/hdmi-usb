@@ -105,9 +105,13 @@ Launcher script that:
 - local preview window save/restore (when X11 tooling exists)
 - `test_hdmi_usb_screenshot_mcp.py` (MCP stdio against running RTSP)
 - headless RTSP + same MCP test
+- software fallback: server started against a plugin directory that symlinks
+  every system plugin except `libgstva.so`/`libgstvaapi.so`/`libgstnvcodec.so`
+  (path from `pkg-config --variable=pluginsdir gstreamer-1.0`), asserting it
+  streams, serves a frame over MCP, and logs no `Using hardware` line
 
 `test_hdmi_usb_screenshot_mcp.py` is also the focused unit for MCP; it does not start `hdmi-usb.py` itself.
 
-It does not attempt to force/fake hardware failure states, so it does not
-exercise wrapper recovery paths, audio card matching, or instance-kill
-behavior.
+Beyond hiding the hardware plugins, it does not force/fake hardware failure
+states, so it does not exercise the runtime hardware-decode downgrade, wrapper
+recovery paths, audio card matching, or instance-kill behavior.

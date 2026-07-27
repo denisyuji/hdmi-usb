@@ -164,4 +164,6 @@ python3 test_hdmi_usb_screenshot_mcp.py --frame-wait 60 --debug-child
 
 Window position and size are automatically saved and restored between sessions. Use `--reset-window` to clear saved state.
 
-Window state is stored at `${XDG_CONFIG_HOME:-~/.config}/hdmi-usb/window-state` (legacy installs may have `~/.hdmi-rtsp-unified-window-state`, which is migrated automatically).
+Window state is stored at `${XDG_CONFIG_HOME:-~/.config}/hdmi-usb/window-state` (legacy installs may have `~/.hdmi-rtsp-unified-window-state`, which is migrated automatically). The path does not depend on the directory the app is started from.
+
+The window is always kept at a 16:9 aspect ratio. Resizing it by hand snaps it back, adjusting the side you did not drag: change the width and the height follows, change the height and the width follows. When both change at once (corner drag, maximize), whichever correction is smaller wins. The same applies when `--width` is used, in which case the geometry is neither restored nor saved.

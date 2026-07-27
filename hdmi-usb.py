@@ -617,8 +617,10 @@ class LocalDisplayPipeline:
         self._window_watch_window_id = None
         self._window_watch_last_geometry = None
         self._window_watch_ignore_until = 0.0
-        self._window_watch_last_w = None
-        self._window_watch_last_h = None
+        # Last geometry seen at 16:9; the baseline for deciding which side the
+        # user dragged.
+        self._window_watch_ratio_w = None
+        self._window_watch_ratio_h = None
         self._window_watch_adjusting_until = 0.0
         
         # Register cleanup function for robust cleanup
@@ -719,6 +721,10 @@ class LocalDisplayPipeline:
                 return not self._force_applied and self._force_attempts < 3
 
             GLib.timeout_add_seconds(2, retry_force)
+
+            # Keep enforcing 16:9 on later manual resizes (geometry is still
+            # never saved while --width is in effect).
+            self._start_window_watch()
             return False
 
         if (not self._restore_applied and
@@ -746,7 +752,7 @@ class LocalDisplayPipeline:
 
             GLib.timeout_add_seconds(2, retry_restore)
 
-        # Start auto-saving window geometry changes (unless --width is used).
+        # Start 16:9 enforcement and auto-saving of window geometry changes.
         self._start_window_watch()
 
         return False
@@ -775,12 +781,20 @@ class LocalDisplayPipeline:
             self.log(f"Restoring window state: {geometry}")
             
             # Parse geometry (format: WIDTHxHEIGHT+X+Y)
-            match = re.match(r'^(\d+)x(\d+)([+-]\d+)([+-]\d+)$', geometry)
+            match = re.match(r'^(\d+)x(\d+)([+-]-?\d+)([+-]-?\d+)$', geometry)
             if match:
                 self.restore_width = match.group(1)
                 self.restore_height = match.group(2)
-                self.restore_x = match.group(3)
-                self.restore_y = match.group(4)
+                # State files written before the geometry reader was fixed may
+                # hold doubled signs from xwininfo ("+-50", "--86"); both forms
+                # mean a negative offset.
+                offsets = []
+                for group in (match.group(3), match.group(4)):
+                    value = int(group.lstrip('+-'))
+                    if '-' in group:
+                        value = -value
+                    offsets.append(f"{value:+d}")
+                self.restore_x, self.restore_y = offsets
 
                 # Enforce 16:9 on restore.
                 #
@@ -817,9 +831,24 @@ class LocalDisplayPipeline:
         
         while time.time() - start_time < timeout:
             try:
-                # Method 0 (most reliable): match windows by PID via `wmctrl -lp`.
-                # Output format: WIN_ID DESK PID WM_CLASS TITLE...
+                # Method 0 (most reliable): score windows by PID, WM_CLASS and title.
+                # `wmctrl -lp` reports the PID but its 4th column is the client
+                # machine, not WM_CLASS; `wmctrl -lx` reports WM_CLASS but no PID.
+                # Read both and merge them by window ID.
                 try:
+                    classes = {}
+                    wmctrl_lx = subprocess.run(
+                        ['wmctrl', '-lx'],
+                        capture_output=True,
+                        text=True,
+                        timeout=1
+                    )
+                    if wmctrl_lx.returncode == 0:
+                        for line in wmctrl_lx.stdout.splitlines():
+                            parts = line.split(None, 4)
+                            if len(parts) >= 3:
+                                classes[parts[0].lower()] = parts[2]
+
                     wmctrl_lp = subprocess.run(
                         ['wmctrl', '-lp'],
                         capture_output=True,
@@ -827,26 +856,27 @@ class LocalDisplayPipeline:
                         timeout=1
                     )
                     if wmctrl_lp.returncode == 0:
-                        candidates = []
+                        best_score = 0
+                        best = None
                         for line in wmctrl_lp.stdout.splitlines():
                             parts = line.split(None, 4)
                             if len(parts) < 4:
                                 continue
-                            win_id, _desk, pid_str, wm_class = parts[:4]
+                            win_id, _desk, pid_str = parts[:3]
                             title = parts[4] if len(parts) >= 5 else ""
                             try:
                                 pid = int(pid_str)
                             except ValueError:
                                 continue
                             score = 0
-                            wm_class_l = wm_class.lower()
+                            wm_class_l = classes.get(win_id.lower(), "").lower()
                             title_l = title.lower()
 
                             # Prefer windows owned by this process, but don't require it:
-                            # some sinks/window systems report a different PID.
+                            # some sinks/window systems report a different PID (often 0).
                             if pid == self.owner_pid:
                                 score += 3
-                            if pid == 0:
+                            elif pid == 0:
                                 score += 1
 
                             if ('gstreamer' in wm_class_l or
@@ -857,11 +887,19 @@ class LocalDisplayPipeline:
                                 'opengl' in title_l or
                                 'python' in title_l):
                                 score += 1
-                            candidates.append((score, win_id))
-                        if candidates:
-                            candidates.sort(reverse=True)
-                            best = candidates[0][1]
-                            self.log(f"Found window ID by PID {self.owner_pid}: {best}")
+                            if score > best_score:
+                                best_score = score
+                                best = win_id
+                        # Only accept a window we have real evidence for, and keep
+                        # polling otherwise: the sink window appears a moment after
+                        # PLAYING, and returning an unrelated window (a terminal, a
+                        # browser) would move/resize it and pin the geometry
+                        # auto-save to it, overwriting the saved state.
+                        if best and best_score >= 2:
+                            self.log(
+                                f"Found window ID {best} (score {best_score}, "
+                                f"owner pid {self.owner_pid})"
+                            )
                             return best
                 except Exception:
                     # wmctrl may be missing; fall back to other methods below.
@@ -913,7 +951,14 @@ class LocalDisplayPipeline:
         return None
     
     def get_window_geometry(self, window_id: str) -> Optional[str]:
-        """Get window geometry."""
+        """Get window geometry as WIDTHxHEIGHT+X+Y.
+
+        The offsets come from xwininfo's `-geometry` line, which is in the same
+        coordinate space as `wmctrl -e`. For windows placed past the left or top
+        edge that line carries doubled signs (`900x506+-50+-40`,
+        `1400x540--28+200`); those are normalised here, otherwise the geometry
+        parses nowhere and gets saved to the state file unreadable.
+        """
         try:
             result = subprocess.run(
                 ['xwininfo', '-id', window_id],
@@ -921,15 +966,25 @@ class LocalDisplayPipeline:
                 text=True,
                 timeout=1
             )
-            
+
             for line in result.stdout.splitlines():
                 if '-geometry' in line:
                     parts = line.split()
-                    if len(parts) >= 2:
+                    if len(parts) < 2:
+                        continue
+                    match = re.match(r'^(\d+)x(\d+)([+-]-?\d+)([+-]-?\d+)$', parts[1])
+                    if not match:
                         return parts[1]
+                    offsets = []
+                    for group in (match.group(3), match.group(4)):
+                        value = int(group.lstrip('+-'))
+                        if '-' in group:
+                            value = -value
+                        offsets.append(f"{value:+d}")
+                    return f"{match.group(1)}x{match.group(2)}{offsets[0]}{offsets[1]}"
         except Exception:
             pass
-        
+
         return None
     
     def _apply_window_state_to_window(self, window_id: str) -> bool:
@@ -1311,10 +1366,11 @@ class LocalDisplayPipeline:
         return applied
 
     def _start_window_watch(self) -> None:
-        """Start a GLib timer that saves window geometry whenever it changes."""
-        if self.force_width:
-            return
+        """Start a GLib timer that keeps the window at 16:9 and saves its geometry.
 
+        With --width the size is imposed by the user, so geometry is never saved,
+        but the aspect ratio is still enforced on later manual resizes.
+        """
         # Avoid double-starting.
         if self._window_watch_id is not None:
             return
@@ -1342,48 +1398,73 @@ class LocalDisplayPipeline:
                     self._window_watch_id = GLib.timeout_add(delay_ms, _tick)
                     return False
 
-                if time.time() >= self._window_watch_ignore_until:
-                    m = re.match(r'^(\d+)x(\d+)([+-]\d+)([+-]\d+)$', geometry)
-                    if m:
-                        w, h = int(m.group(1)), int(m.group(2))
-                        if time.time() >= self._window_watch_adjusting_until:
-                            # Only enforce 16:9 once the geometry is stable across
-                            # two ticks; enforcing on a freshly-read value races
-                            # with concurrent external resizes (the read is ~1s
-                            # stale by the time the resize is applied).
-                            if (geometry == self._window_watch_last_geometry and
-                                    abs((w * 9) - (h * 16)) > 32):  # ~2px tolerance
-                                drive_width = True
-                                if self._window_watch_last_w is not None and self._window_watch_last_h is not None:
-                                    drive_width = abs(w - self._window_watch_last_w) >= abs(h - self._window_watch_last_h)
-                                if drive_width:
-                                    target_w, target_h = _round_even(w), _compute_height_for_16_9(w)
+                m = re.match(r'^(\d+)x(\d+)([+-]\d+)([+-]\d+)$', geometry)
+                w = int(m.group(1)) if m else 0
+                h = int(m.group(2)) if m else 0
+
+                # Remember the last geometry that was already 16:9, including
+                # during the startup grace period, so the very first manual
+                # resize already has a baseline to compare against.
+                if m and abs((w * 9) - (h * 16)) <= 32:  # ~2px tolerance
+                    self._window_watch_ratio_w = w
+                    self._window_watch_ratio_h = h
+
+                if m and time.time() >= self._window_watch_ignore_until:
+                    if time.time() >= self._window_watch_adjusting_until:
+                        # Only enforce 16:9 once the geometry is stable across
+                        # two ticks; enforcing on a freshly-read value races
+                        # with concurrent external resizes (the read is ~1s
+                        # stale by the time the resize is applied).
+                        if (geometry == self._window_watch_last_geometry and
+                                abs((w * 9) - (h * 16)) > 32):  # ~2px tolerance
+                            # Adjust the side the user did not drag: a width
+                            # change drives the height and vice versa. The
+                            # comparison is against the last 16:9 geometry,
+                            # because by the time this runs the previous tick
+                            # already holds the new (off-ratio) size.
+                            #
+                            # When both sides changed (corner drag, maximize),
+                            # keep the correction as small as possible.
+                            smaller_change = (abs(_compute_height_for_16_9(w) - h) <=
+                                              abs(_compute_width_for_16_9(h) - w))
+                            if (self._window_watch_ratio_w is not None and
+                                    self._window_watch_ratio_h is not None):
+                                dw = abs(w - self._window_watch_ratio_w)
+                                dh = abs(h - self._window_watch_ratio_h)
+                                if dw > 2 and dh > 2:
+                                    drive_width = smaller_change
                                 else:
-                                    target_h, target_w = _round_even(h), _compute_width_for_16_9(h)
-                                if abs(target_w - w) >= 2 or abs(target_h - h) >= 2:
-                                    # Re-read right before applying: an external
-                                    # resize (user/wmctrl) may have landed since
-                                    # this tick's read, and applying a target
-                                    # computed from the stale value would stomp it.
-                                    fresh = self.get_window_geometry(self._window_watch_window_id)
-                                    if fresh != geometry:
-                                        geometry = fresh or geometry
-                                    else:
-                                        self.log(f"Enforcing 16:9: {target_w}x{target_h} (from {w}x{h})")
-                                        self._window_watch_adjusting_until = time.time() + 2.0
-                                        self._apply_window_size_to_window(self._window_watch_window_id, target_w, target_h)
-                                        stable_ticks[0] = 0
-                                        self._window_watch_id = GLib.timeout_add(1000, _tick)
-                                        return False
+                                    drive_width = dw >= dh
+                            else:
+                                drive_width = smaller_change
+                            if drive_width:
+                                target_w, target_h = _round_even(w), _compute_height_for_16_9(w)
+                            else:
+                                target_h, target_w = _round_even(h), _compute_width_for_16_9(h)
+                            if abs(target_w - w) >= 2 or abs(target_h - h) >= 2:
+                                # Re-read right before applying: an external
+                                # resize (user/wmctrl) may have landed since
+                                # this tick's read, and applying a target
+                                # computed from the stale value would stomp it.
+                                fresh = self.get_window_geometry(self._window_watch_window_id)
+                                if fresh != geometry:
+                                    geometry = fresh or geometry
+                                else:
+                                    self.log(
+                                        f"Enforcing 16:9: {target_w}x{target_h} (from {w}x{h}, "
+                                        f"baseline {self._window_watch_ratio_w}x{self._window_watch_ratio_h}, "
+                                        f"driving {'width' if drive_width else 'height'})"
+                                    )
+                                    self._window_watch_adjusting_until = time.time() + 2.0
+                                    self._apply_window_size_to_window(self._window_watch_window_id, target_w, target_h)
+                                    stable_ticks[0] = 0
+                                    self._window_watch_id = GLib.timeout_add(1000, _tick)
+                                    return False
 
                 if geometry != self._window_watch_last_geometry:
                     self._window_watch_last_geometry = geometry
                     stable_ticks[0] = 0
-                    m = re.match(r'^(\d+)x(\d+)([+-]\d+)([+-]\d+)$', geometry)
-                    if m:
-                        self._window_watch_last_w = int(m.group(1))
-                        self._window_watch_last_h = int(m.group(2))
-                    if time.time() >= self._window_watch_ignore_until:
+                    if time.time() >= self._window_watch_ignore_until and not self.force_width:
                         try:
                             self.window_state_file.parent.mkdir(parents=True, exist_ok=True)
                             self.window_state_file.write_text(geometry)

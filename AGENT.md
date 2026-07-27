@@ -67,7 +67,11 @@ Launcher script that:
 
 - **Window state**: saved to `${XDG_CONFIG_HOME:-~/.config}/hdmi-usb/window-state` as `WIDTHxHEIGHT+X+Y`
   - Legacy path (migrated automatically): `~/.hdmi-rtsp-unified-window-state`
+  - With `--width` the geometry is neither restored nor saved, but 16:9 is still enforced on manual resizes
+  - 16:9 correction adjusts the side the user did not drag (compared against the last 16:9 geometry); if both sides changed, the smaller correction wins
+  - Offsets are normalised on read: xwininfo reports negative positions as `+-50` / `--28`, which used to be saved unparseable and silently dropped the whole restore
 - **Window tooling**: uses `wmctrl`, `xwininfo`, and `xprop` (best-effort; missing tools shouldn’t crash the server)
+  - The sink window is identified by scoring PID (`wmctrl -lp`), WM_CLASS (`wmctrl -lx`) and title; a window is only accepted above a confidence threshold, otherwise polling continues until timeout
 - **RTSP multi-client robustness**: static server pipeline avoids per-client capture opens
 - **Audio matching**: prefers ALSA card on same USB path as the video device
 - **Shutdown/cleanup**: robust cleanup via `atexit` registry + GLib signal integration

@@ -1495,7 +1495,7 @@ class LocalDisplayPipeline:
             self.log("Using pulsesink for local audio output")
             return "pulsesink buffer-time=200000 latency-time=100000"
         self.log("pulsesink not found, falling back to autoaudiosink")
-        return "autoaudiosink sync=false"
+        return "autoaudiosink"
 
     def build_pipeline(self):
         """Build local display pipeline consuming raw frames from the capture pipeline."""
@@ -1508,13 +1508,20 @@ class LocalDisplayPipeline:
             raise RuntimeError("No suitable video sink (need glimagesink, xvimagesink, or ximagesink)")
         self.log(f"Using local videosink: {sink_name}")
 
+        # Both sinks must sync to the pipeline clock.  With sync=false the video
+        # sink renders each frame on arrival and skips the ~420 ms of latency the
+        # audio sink honours, so video ran a measured ~417 ms ahead of audio for
+        # the whole session — roughly ten times the lip-sync threshold.
+        # A synced sink enforces its processing deadline, so each branch needs a
+        # queue to convert in: without one the sink warns "Pipeline construction
+        # is invalid, please add queues." and shortens its own latency.
         video = (
-            f'intervideosrc channel=hdmi-local-v ! '
+            f'intervideosrc channel=hdmi-local-v ! queue ! '
             f'videoconvert ! videoscale ! '
-            f'{sink_name} name=videosink sync=false force-aspect-ratio=false'
+            f'{sink_name} name=videosink force-aspect-ratio=false'
         )
         audio = (
-            f' interaudiosrc channel=hdmi-local-a ! '
+            f' interaudiosrc channel=hdmi-local-a ! queue ! '
             f'audioconvert ! audioresample ! {self._pick_audio_output_sink()}'
         ) if self.has_audio else ''
 

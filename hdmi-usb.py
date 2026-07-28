@@ -40,6 +40,17 @@ except Exception:
     # Best-effort; fall back to default buffering on failure
     pass
 
+# glimagesink (the preferred local-preview sink, see build_pipeline) opens a
+# native Wayland surface when running under a Wayland session. That surface
+# bypasses X11 entirely: it never requests window decorations, and none of
+# wmctrl/xprop/xwininfo (used below for geometry restore, forced 16:9 sizing,
+# and decoration hints) can see or manage it, since those are X11-only tools.
+# Forcing GstGL's windowing backend to X11 makes it create a normal XWayland
+# top-level window instead - decorated by the compositor like any other X11
+# client, and manageable by the existing window-management code. This is a
+# no-op on a plain X11 session, where X11 is already the only option.
+os.environ.setdefault('GST_GL_WINDOW', 'x11')
+
 gi.require_version('Gst', '1.0')
 gi.require_version('GstRtsp', '1.0')
 gi.require_version('GstRtspServer', '1.0')
@@ -624,7 +635,10 @@ class LocalDisplayPipeline:
         self._window_watch_ratio_w = None
         self._window_watch_ratio_h = None
         self._window_watch_adjusting_until = 0.0
-        
+
+        # Window IDs we've already asked the WM/compositor to decorate.
+        self._decorated_window_ids = set()
+
         # Register cleanup function for robust cleanup
         register_cleanup(self.stop)
 
@@ -823,9 +837,39 @@ class LocalDisplayPipeline:
         except Exception as e:
             self.log(f"Failed to read window state: {e}")
     
+    def _ensure_window_decorated(self, window_id: str) -> None:
+        """Ask the WM/compositor to draw normal decorations on the sink window.
+
+        ximagesink/xvimagesink/glimagesink open a bare Xlib window and never set
+        _NET_WM_WINDOW_TYPE or Motif decoration hints. A WM/XWayland compositor
+        that relies on those hints to decide whether to draw a title bar and
+        border then leaves the window bare, which also makes it look like
+        moving/resizing has no chrome to grab. Setting both hints once per
+        window is enough to get normal borders back without touching the
+        existing geometry logic below.
+        """
+        if window_id in self._decorated_window_ids:
+            return
+        self._decorated_window_ids.add(window_id)
+        try:
+            subprocess.run(
+                ['xprop', '-id', window_id, '-f', '_NET_WM_WINDOW_TYPE', '32a',
+                 '-set', '_NET_WM_WINDOW_TYPE', '_NET_WM_WINDOW_TYPE_NORMAL'],
+                capture_output=True, text=True, timeout=1
+            )
+            # Motif hints: flags=MWM_HINTS_DECORATIONS(2), functions=0,
+            # decorations=MWM_DECOR_ALL(1), input_mode=0, status=0.
+            subprocess.run(
+                ['xprop', '-id', window_id, '-f', '_MOTIF_WM_HINTS', '32c',
+                 '-set', '_MOTIF_WM_HINTS', '0x2, 0x0, 0x1, 0x0, 0x0'],
+                capture_output=True, text=True, timeout=1
+            )
+        except Exception as e:
+            self.log(f"Could not set decoration hints on {window_id}: {e}")
+
     def get_window_id(self, timeout: float = 5.0) -> Optional[str]:
         """Get window ID for GStreamer window.
-        
+
         When using Gst.parse_launch(), the window is named 'python3' with class 'GStreamer',
         not 'gst-launch-1.0' like when using the command-line tool.
         """
@@ -902,6 +946,7 @@ class LocalDisplayPipeline:
                                 f"Found window ID {best} (score {best_score}, "
                                 f"owner pid {self.owner_pid})"
                             )
+                            self._ensure_window_decorated(best)
                             return best
                 except Exception:
                     # wmctrl may be missing; fall back to other methods below.
@@ -922,6 +967,7 @@ class LocalDisplayPipeline:
                             if len(parts) >= 4:
                                 window_id = parts[3]
                                 self.log(f"Found window ID by name 'python3': {window_id}")
+                                self._ensure_window_decorated(window_id)
                                 return window_id
                 
                 # Method 2: Look for window with GStreamer class
@@ -942,6 +988,7 @@ class LocalDisplayPipeline:
                         if len(parts) >= 1:
                             window_id = parts[0]
                             self.log(f"Found window ID by class: {window_id}")
+                            self._ensure_window_decorated(window_id)
                             return window_id
                             
             except Exception as e:

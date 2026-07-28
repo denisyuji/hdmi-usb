@@ -1,5 +1,20 @@
 #!/bin/bash
 
+# === Install system dependencies (Debian/Ubuntu) ===
+if command -v apt-get >/dev/null 2>&1; then
+  echo "[INFO] Installing system dependencies via apt..."
+  sudo apt-get update
+  sudo apt-get install -y \
+    gstreamer1.0-tools gstreamer1.0-plugins-base \
+    gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+    gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-gl \
+    v4l-utils wmctrl x11-utils alsa-utils python3 \
+    gir1.2-gst-rtsp-server-1.0 python3-gi
+else
+  echo "[WARN] apt-get not found; skipping system dependency install."
+  echo "[WARN] See README.md 'Dependencies' section for required packages."
+fi
+
 echo "[INFO] Installing hdmi-usb..."
 mkdir -p ~/.local/bin
 cp ./hdmi-usb.py ~/.local/bin/hdmi-usb.py

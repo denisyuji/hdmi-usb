@@ -63,7 +63,24 @@ AUDIO_FORCE_CARD=1 python3 hdmi-usb.py
 # Show app debug logs and/or GStreamer debug logs
 python3 hdmi-usb.py --debug
 python3 hdmi-usb.py --gst-debug
+
+# Trim lip-sync in the preview window (milliseconds)
+python3 hdmi-usb.py --av-offset -60
 ```
+
+### Lip-sync in the local preview
+
+Capture and playback latencies vary with the capture stick, the sound card and
+the compositor, and GStreamer cannot query them, so a residual offset between
+the preview picture and the sound is expected. `--av-offset` trims it:
+
+- **negative** delays the video, for when the picture runs ahead of the sound
+- **positive** delays the audio, for the opposite case
+
+Find the value by eye — start around ±50 ms and halve the step each time the
+error changes sign. It applies to the preview window only; RTSP clients carry
+proper timestamps and sync on their own. The flag is ignored when no audio
+device is in use.
 
 **Default RTSP URL:** `rtsp://127.0.0.1:1234/hdmi` (server listens on `0.0.0.0:1234`)
 

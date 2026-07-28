@@ -593,6 +593,7 @@ class LocalDisplayPipeline:
         server=None,
         force_width: Optional[int] = None,
         has_audio: bool = False,
+        av_offset_ms: float = 0.0,
     ):
         self.debug_mode = debug_mode
         self.has_audio = has_audio
@@ -600,6 +601,7 @@ class LocalDisplayPipeline:
         self.server = server
         self.owner_pid = os.getpid()
         self.force_width = force_width
+        self.av_offset_ms = av_offset_ms
         
         # Window state management (fixed path so it works when started from any cwd)
         self.window_state_file = get_window_state_path()
@@ -1515,14 +1517,34 @@ class LocalDisplayPipeline:
         # A synced sink enforces its processing deadline, so each branch needs a
         # queue to convert in: without one the sink warns "Pipeline construction
         # is invalid, please add queues." and shortens its own latency.
+        #
+        # Residual skew is trimmed with --av-offset.  Correct only by delaying
+        # the early branch: a negative ts-offset asks the sink to render in the
+        # past, which just makes every buffer late.  The remaining skew comes
+        # from capture and playback latencies this code cannot query, so the
+        # value has to be found by eye on the machine it runs on.
+        video_offset, audio_offset = 0, 0
+        if self.av_offset_ms and not self.has_audio:
+            # Nothing to line up against, and delaying video alone would only
+            # add latency.
+            self.log("--av-offset ignored: no audio device in use")
+        elif self.av_offset_ms > 0:
+            audio_offset = int(self.av_offset_ms * Gst.MSECOND)
+            self.log(f"Delaying local audio by {self.av_offset_ms:.0f} ms")
+        elif self.av_offset_ms < 0:
+            video_offset = int(-self.av_offset_ms * Gst.MSECOND)
+            self.log(f"Delaying local video by {-self.av_offset_ms:.0f} ms")
+
         video = (
             f'intervideosrc channel=hdmi-local-v ! queue ! '
             f'videoconvert ! videoscale ! '
-            f'{sink_name} name=videosink force-aspect-ratio=false'
+            f'{sink_name} name=videosink force-aspect-ratio=false '
+            f'ts-offset={video_offset}'
         )
         audio = (
             f' interaudiosrc channel=hdmi-local-a ! queue ! '
-            f'audioconvert ! audioresample ! {self._pick_audio_output_sink()}'
+            f'audioconvert ! audioresample ! {self._pick_audio_output_sink()} '
+            f'ts-offset={audio_offset}'
         ) if self.has_audio else ''
 
         pipeline = Gst.parse_launch(video + audio)
@@ -1938,7 +1960,8 @@ class RTSPServer(GstRtspServer.RTSPServer):
                 return spec
         return None
 
-    def __init__(self, debug_mode=False, headless=False, viewer_width: Optional[int] = None):
+    def __init__(self, debug_mode=False, headless=False, viewer_width: Optional[int] = None,
+                 av_offset_ms: float = 0.0):
         super().__init__()
         self.port = DEFAULT_RTSP_PORT
         self.endpoint = DEFAULT_RTSP_ENDPOINT
@@ -1948,6 +1971,7 @@ class RTSPServer(GstRtspServer.RTSPServer):
         self.pipeline_errors = 0
         self.local_display = None
         self.viewer_width = viewer_width
+        self.av_offset_ms = av_offset_ms
         self.audio_device_spec: Optional[str] = None
         self.set_address("0.0.0.0")
         self.set_service(self.port)
@@ -2047,6 +2071,7 @@ class RTSPServer(GstRtspServer.RTSPServer):
                 server=self,
                 force_width=self.viewer_width,
                 has_audio=bool(audio_card),
+                av_offset_ms=self.av_offset_ms,
             )
             if not self.local_display.start():
                 print(f"[{timestamp()}] ⚠️  Local display failed to start, continuing with RTSP server only")
@@ -2173,6 +2198,16 @@ COMPATIBILITY:
         help='Force local viewer window width (16:9); ignores saved geometry'
     )
     parser.add_argument(
+        '--av-offset',
+        type=float,
+        default=0.0,
+        metavar='MS',
+        help='Trim local preview lip-sync, in milliseconds. Negative delays '
+             'video (use when video runs ahead of sound), positive delays '
+             'audio. Find the value by eye; it depends on the capture and '
+             'sound hardware'
+    )
+    parser.add_argument(
         '--debug',
         action='store_true',
         help='Enable debug output'
@@ -2226,6 +2261,7 @@ COMPATIBILITY:
             debug_mode=args.debug,
             headless=args.headless,
             viewer_width=args.width,
+            av_offset_ms=args.av_offset,
         )
         loop = GLib.MainLoop()
         server.set_main_loop(loop)

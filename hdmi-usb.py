@@ -1544,10 +1544,21 @@ class LocalDisplayPipeline:
         sinks sync to the clock, so the pipeline runs at the largest sink
         latency, which is this one.  60 ms is the smallest buffer that stayed
         underrun-free here; raise it toward 200 ms if audio crackles.
+
+        provide-clock=false keeps pulsesink from becoming this pipeline's
+        clock. Left at its default it would, so this pipeline's time base
+        would be the playback device's hardware clock, unrelated to the
+        capture pipeline's clock feeding it frames via intervideosrc/
+        interaudiosrc. With no shared reference both pipelines free-run and
+        drift apart. Falling back to GstSystemClock instead, which the
+        capture pipeline also uses once alsasrc stops providing its own
+        clock (see the capture pipeline's alsasrc), gives both pipelines the
+        literal same clock object, since GstSystemClock is a process-wide
+        singleton.
         """
         if Gst.ElementFactory.find("pulsesink"):
             self.log("Using pulsesink for local audio output")
-            return "pulsesink buffer-time=60000 latency-time=20000"
+            return "pulsesink buffer-time=60000 latency-time=20000 provide-clock=false"
         self.log("pulsesink not found, falling back to autoaudiosink")
         return "autoaudiosink"
 
@@ -1832,9 +1843,23 @@ class RTSPServer(GstRtspServer.RTSPServer):
 
         if audio_device_spec:
             device_q = audio_device_spec.replace('"', '\\"')
+            # provide-clock=false keeps this alsasrc from becoming the capture
+            # pipeline's clock, which is its default as the only live source
+            # able to provide one. Left as the clock, the whole pipeline
+            # would run on the MS2109's audio ADC crystal, which is about
+            # 44 ppm off real time (measured on this hardware, ~0.16 s/hour).
+            # v4l2src has no clock of its own (do-timestamp=true stamps
+            # frames from the pipeline clock at arrival), so falling back to
+            # GstSystemClock puts video, audio, and the local-display
+            # pipeline (see pulsesink) all on the same accurate time base.
+            # slave-method=resample then corrects the real ADC drift by
+            # gently resampling the audio to that clock, instead of the
+            # default "skew" method, which just re-timestamps and produces
+            # periodic jumps.
             audio = (
                 f' alsasrc device="{device_q}" '
-                f'buffer-time=50000 latency-time=10000 ! '
+                f'buffer-time=50000 latency-time=10000 '
+                f'provide-clock=false slave-method=resample ! '
                 f'queue max-size-time=1000000000 ! audioconvert ! audioresample ! tee name=atee '
                 f'atee. ! queue ! interaudiosink channel=hdmi-rtsp-a '
                 f'atee. ! queue ! interaudiosink channel=hdmi-local-a'

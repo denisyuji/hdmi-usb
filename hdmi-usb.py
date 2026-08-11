@@ -65,7 +65,7 @@ AUDIO_SAMPLE_RATE_HZ = 48000
 AUDIO_BITRATE_BPS = 128000
 VIDEO_BITRATE_KBPS = 3000
 VIDEO_KEYFRAME_INTERVAL_FRAMES = 30
-VIDEO_CAPTURE_FPS = 25
+VIDEO_CAPTURE_FPS = 60
 # Window after the hardware-decode capture pipeline reaches PLAYING during which
 # a pipeline error is treated as a hardware failure and retried in software.
 HW_DECODE_PROBATION_SECONDS = 10
@@ -1539,10 +1539,15 @@ class LocalDisplayPipeline:
         explicit buffer-time / latency-time; without them the tiny default
         buffers cause underruns and silence.  autoaudiosink does not forward
         those properties to its child sink, so we prefer pulsesink directly.
+
+        The buffer size sets the preview latency for video too: both local
+        sinks sync to the clock, so the pipeline runs at the largest sink
+        latency, which is this one.  60 ms is the smallest buffer that stayed
+        underrun-free here; raise it toward 200 ms if audio crackles.
         """
         if Gst.ElementFactory.find("pulsesink"):
             self.log("Using pulsesink for local audio output")
-            return "pulsesink buffer-time=200000 latency-time=100000"
+            return "pulsesink buffer-time=60000 latency-time=20000"
         self.log("pulsesink not found, falling back to autoaudiosink")
         return "autoaudiosink"
 
@@ -1582,14 +1587,34 @@ class LocalDisplayPipeline:
             video_offset = int(-self.av_offset_ms * Gst.MSECOND)
             self.log(f"Delaying local video by {-self.av_offset_ms:.0f} ms")
 
+        # The delayed branch needs a queue large enough to hold the offset.  A
+        # default queue stops at 10 MB — about three 1080p frames — so the sink's
+        # longer wait back-pressures intervideosrc, which timestamps from a frame
+        # counter rather than from the clock.  Its PTS then slips back by exactly
+        # the offset and cancels it: the picture delay saturated near 100 ms no
+        # matter how large --av-offset was.  Sizing the queue by time, with the
+        # byte and buffer caps off, keeps the source free-running so the offset
+        # reaches the screen.  Holding the offset costs real memory — raw 1080p
+        # runs about 78 MB per second — so the queue gets the offset plus enough
+        # margin to absorb jitter and nothing more.  Below ~500 ms of margin the
+        # source still slipped, and the offset landed short by a fixed ~90 ms.
+        video_queue = audio_queue = 'queue'
+        deep_queue = (
+            'queue max-size-bytes=0 max-size-buffers=0 max-size-time={}'
+        )
+        if video_offset:
+            video_queue = deep_queue.format(video_offset + 500 * Gst.MSECOND)
+        elif audio_offset:
+            audio_queue = deep_queue.format(audio_offset + 500 * Gst.MSECOND)
+
         video = (
-            f'intervideosrc channel=hdmi-local-v ! queue ! '
+            f'intervideosrc channel=hdmi-local-v ! {video_queue} ! '
             f'videoconvert ! videoscale ! '
             f'{sink_name} name=videosink force-aspect-ratio=false '
             f'ts-offset={video_offset}'
         )
         audio = (
-            f' interaudiosrc channel=hdmi-local-a ! queue ! '
+            f' interaudiosrc channel=hdmi-local-a ! {audio_queue} ! '
             f'audioconvert ! audioresample ! {self._pick_audio_output_sink()} '
             f'ts-offset={audio_offset}'
         ) if self.has_audio else ''
@@ -1808,7 +1833,8 @@ class RTSPServer(GstRtspServer.RTSPServer):
         if audio_device_spec:
             device_q = audio_device_spec.replace('"', '\\"')
             audio = (
-                f' alsasrc device="{device_q}" ! '
+                f' alsasrc device="{device_q}" '
+                f'buffer-time=50000 latency-time=10000 ! '
                 f'queue max-size-time=1000000000 ! audioconvert ! audioresample ! tee name=atee '
                 f'atee. ! queue ! interaudiosink channel=hdmi-rtsp-a '
                 f'atee. ! queue ! interaudiosink channel=hdmi-local-a'

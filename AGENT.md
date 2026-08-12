@@ -7,6 +7,7 @@ This project provides automated HDMI capture device detection and streaming for 
 The current codebase centers around a single unified Python RTSP server (`hdmi-usb.py`) plus helpers:
 - A wrapper launcher (`hdmi-usb`) that can do device preflight/recovery and run the server in the background.
 - An MCP-only helper (`hdmi-usb-screenshot-mcp`, Python 3 + GStreamer GI) that exposes the RTSP video frame over **MCP stdio** (`get_last_frame`).
+- A recorder (`hdmi-usb-record`, Python 3 + GStreamer GI) that saves a timed audio+video clip from the RTSP stream to MP4 and prints the resulting path.
 
 ## Key Components
 
@@ -58,8 +59,22 @@ Launcher script that:
 
 **Automated check:** `test_hdmi_usb_screenshot_mcp.py` spawns the binary (NDJSON), validates handshake + PNG from `get_last_frame` (RTSP must already be running).
 
+### hdmi-usb-record
+RTSP recorder (default URL `rtsp://127.0.0.1:1234/hdmi`, overridable via `RTSP_URL` / `--url`). Requires the RTSP server to be running already.
+
+- **Implementation**: Python 3 using GStreamer via GI (`gi.repository.Gst`, `GLib`); no PyPI deps and no ffmpeg.
+- **Pipeline**: `rtspsrc protocols=tcp latency=200` with branches built on `pad-added` — `rtph264depay ! h264parse` for H.264 and `rtpmp4gdepay ! aacparse` for the server's `rtpmp4gpay` AAC — both linked into `mp4mux ! filesink`. Nothing is decoded or re-encoded, so the recording is a **stream copy**.
+- **Audio is optional**: branches are created from the caps of whatever pads `rtspsrc` exposes, so a video-only server records fine; `has_audio` reports what was captured.
+- **Muxer pad race**: each branch is held by a **blocking pad probe** until `rtspsrc` emits `no-more-pads` (with a `BRANCH_UNBLOCK_TIMEOUT_SECONDS` fallback). `mp4mux` refuses request pads once it has started writing, so without this the video branch can start the muxer before the audio pad arrives and the audio track is intermittently dropped.
+- **Duration**: counted from the **first buffer** (pad probe), not from process start, so the RTSP handshake does not shorten the clip. On expiry an EOS is sent so `mp4mux` writes a complete index; a `FINALIZE_TIMEOUT_SECONDS` watchdog prevents hanging.
+- **Failure modes**: no data within `CONNECT_TIMEOUT_SECONDS`, a bus `ERROR`, or an empty output file all exit non-zero with a message naming the URL and how to start the server.
+
+**Agent-facing contract:** the **last line of stdout** is the absolute path (default `./hdmi-usb-<timestamp>.mp4`); progress/errors go to **stderr** only, so `FILE=$(./hdmi-usb-record)` works. `--json` prints `path`, `duration_seconds`, `size_bytes`, `has_audio`, `url`. On failure stdout stays empty.
+
+**CLI flags (see `--help`):** `--duration`/`-t` (default 10 s), `--output`/`-o`, `--url`/`-u`, `--json`, `--debug`/`-d`.
+
 ### install.sh
-- **System Installation**: Copies scripts to `~/.local/bin/` (`hdmi-usb.py`, `hdmi-usb`, `hdmi-usb-screenshot-mcp`)
+- **System Installation**: Copies scripts to `~/.local/bin/` (`hdmi-usb.py`, `hdmi-usb`, `hdmi-usb-screenshot-mcp`, `hdmi-usb-record`)
 - **PATH Management**: Automatically adds `~/.local/bin` to shell PATH
 - **Shell Detection**: Supports bash, zsh, fish, and other shells
 - **Cursor MCP**: Merges `~/.cursor/mcp.json` entry **`hdmi-screenshot`** (`command` → `~/.local/bin/hdmi-usb-screenshot-mcp`, env `RTSP_URL`, `PYTHONUNBUFFERED=1`); skips on invalid JSON with a warning
@@ -120,3 +135,7 @@ Launcher script that:
 Beyond hiding the hardware plugins, it does not force/fake hardware failure
 states, so it does not exercise the runtime hardware-decode downgrade, wrapper
 recovery paths, audio card matching, or instance-kill behavior.
+
+`hdmi-usb-record` has no automated coverage; it was verified manually against a
+running server (repeated short recordings, checked with `ffprobe` for both
+tracks and the expected duration). Recorded `*.mp4` files are gitignored.

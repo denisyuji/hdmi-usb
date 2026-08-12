@@ -29,6 +29,11 @@ START_TIMEOUT_SECONDS="${START_TIMEOUT_SECONDS:-20}"
 WINDOW_TIMEOUT_SECONDS="${WINDOW_TIMEOUT_SECONDS:-20}"
 SCREENSHOT_TIMEOUT_SECONDS="${SCREENSHOT_TIMEOUT_SECONDS:-30}"
 
+# Recording tests: keep the clip short, but long enough that a duration check
+# is meaningful against the ~1.5s tolerance used below.
+RECORD_DURATION_SECONDS="${RECORD_DURATION_SECONDS:-3}"
+RECORD_TIMEOUT_SECONDS="${RECORD_TIMEOUT_SECONDS:-60}"
+
 # Window state file used by hdmi-usb.py
 # New location (XDG): ${XDG_CONFIG_HOME:-$HOME/.config}/hdmi-usb/window-state
 XDG_CONFIG_HOME_REAL="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -264,6 +269,154 @@ wait_for_window_geometry() {
   return 1
 }
 
+mp4_duration_seconds() {
+  # echo the container duration in seconds, or return 1 if it cannot be read.
+  local file="$1" stamp
+  stamp="$(gst-discoverer-1.0 "$file" 2>/dev/null | awk '/^ *Duration:/ {print $2; exit}')"
+  [[ -n "$stamp" ]] || return 1
+  local h m s
+  IFS=':' read -r h m s <<<"$stamp"
+  python3 -c 'import sys; print(int(sys.argv[1])*3600 + int(sys.argv[2])*60 + float(sys.argv[3]))' \
+    "$h" "$m" "$s"
+}
+
+mp4_has_stream() {
+  # mp4_has_stream <file> <video|audio>
+  gst-discoverer-1.0 "$1" 2>/dev/null | grep -qE "^ +$2 #[0-9]+:"
+}
+
+run_record_test() {
+  # Exercise hdmi-usb-record against the running RTSP server.
+  #
+  #   run_record_test <label prefix> [full]
+  #
+  # "full" additionally runs the checks that do not depend on the server mode
+  # (error path, argument validation), so they only run once per test session.
+  local label="$1" full="${2:-0}"
+  local dir="${TEST_LOG_DIR}/record-${TS}"
+  mkdir -p "$dir"
+
+  # --- Default output path: timestamped name, printed as the last stdout line ---
+  local rec_out rec_rc rec_path
+  set +e
+  rec_out="$(cd "$dir" && timeout "$RECORD_TIMEOUT_SECONDS" \
+    "${HDMI_USB_RECORD_BIN}" -t "$RECORD_DURATION_SECONDS" 2>>"$LOG_FILE")"
+  rec_rc=$?
+  set -e
+  rec_path="$(echo "$rec_out" | tail -n 1)"
+
+  if [[ "$rec_rc" != "0" ]]; then
+    mark_fail "${label}: record exits 0 (rc=$rec_rc)"
+    return 0
+  fi
+  if [[ -z "$rec_path" || ! -f "$rec_path" ]]; then
+    mark_fail "${label}: last stdout line is the recording path (got '${rec_path}')"
+    return 0
+  fi
+  mark_pass "${label}: record exits 0 and prints the path"
+
+  # The default name must carry a timestamp so repeated runs never collide.
+  if [[ "$(basename "$rec_path")" =~ ^hdmi-usb-[0-9]{8}-[0-9]{6}\.mp4$ ]]; then
+    mark_pass "${label}: default filename is timestamped"
+  else
+    mark_fail "${label}: default filename is timestamped (got '$(basename "$rec_path")')"
+  fi
+
+  # --- The file must be a real MP4 with video and about the requested length ---
+  if mp4_has_stream "$rec_path" video; then
+    mark_pass "${label}: recording contains a video stream"
+  else
+    mark_fail "${label}: recording contains a video stream"
+  fi
+
+  local dur
+  dur="$(mp4_duration_seconds "$rec_path" || true)"
+  if [[ -n "$dur" ]] && python3 -c "import sys; sys.exit(0 if abs(float(sys.argv[1]) - float(sys.argv[2])) <= 1.5 else 1)" \
+      "$dur" "$RECORD_DURATION_SECONDS"; then
+    mark_pass "${label}: duration ~${RECORD_DURATION_SECONDS}s (got ${dur}s)"
+  else
+    mark_fail "${label}: duration ~${RECORD_DURATION_SECONDS}s (got ${dur:-<unreadable>}s)"
+  fi
+
+  # --- JSON mode: machine-readable contract used by agents ---
+  local json_file="${dir}/json-mode.mp4" json_out json_rc
+  set +e
+  json_out="$(timeout "$RECORD_TIMEOUT_SECONDS" "${HDMI_USB_RECORD_BIN}" \
+    -t "$RECORD_DURATION_SECONDS" -o "$json_file" --json 2>>"$LOG_FILE")"
+  json_rc=$?
+  set -e
+  echo "$json_out" >>"$LOG_FILE"
+
+  if [[ "$json_rc" != "0" ]]; then
+    mark_fail "${label}: --json exits 0 (rc=$json_rc)"
+  elif python3 -c '
+import json, os, sys
+data = json.loads(sys.argv[1])
+expected_path = sys.argv[2]
+for key in ("path", "duration_seconds", "size_bytes", "has_audio", "url"):
+    if key not in data:
+        sys.exit(f"missing key: {key}")
+if data["path"] != os.path.abspath(expected_path):
+    sys.exit(f"path mismatch: {data['path']}")
+if not isinstance(data["has_audio"], bool):
+    sys.exit("has_audio is not a boolean")
+if data["size_bytes"] != os.path.getsize(expected_path):
+    sys.exit("size_bytes does not match the file on disk")
+' "$json_out" "$json_file" 2>>"$LOG_FILE"
+  then
+    mark_pass "${label}: --json reports path, size and has_audio"
+
+    # has_audio must agree with what actually landed in the container. The
+    # capture device may legitimately have no audio, so only the claim is
+    # checked, not the presence of audio itself.
+    local claims_audio
+    claims_audio="$(echo "$json_out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["has_audio"])')"
+    if [[ "$claims_audio" == "True" ]]; then
+      if mp4_has_stream "$json_file" audio; then
+        mark_pass "${label}: has_audio=true matches an audio track in the file"
+      else
+        mark_fail "${label}: has_audio=true but the file has no audio track"
+      fi
+    else
+      if mp4_has_stream "$json_file" audio; then
+        mark_fail "${label}: has_audio=false but the file has an audio track"
+      else
+        mark_pass "${label}: has_audio=false matches a video-only file"
+      fi
+    fi
+  else
+    mark_fail "${label}: --json reports path, size and has_audio"
+  fi
+
+  [[ "$full" == "full" ]] || { rm -rf "$dir"; return 0; }
+
+  # --- Failure path: unreachable server must not print a path to stdout ---
+  local bad_out bad_rc
+  set +e
+  bad_out="$(timeout "$RECORD_TIMEOUT_SECONDS" "${HDMI_USB_RECORD_BIN}" \
+    -t 1 -u "rtsp://127.0.0.1:1/hdmi" -o "${dir}/never.mp4" 2>>"$LOG_FILE")"
+  bad_rc=$?
+  set -e
+  if [[ "$bad_rc" != "0" && -z "$bad_out" ]]; then
+    mark_pass "${label}: unreachable RTSP fails with empty stdout"
+  else
+    mark_fail "${label}: unreachable RTSP fails with empty stdout (rc=$bad_rc out='$bad_out')"
+  fi
+
+  # --- Argument validation ---
+  set +e
+  timeout "$RECORD_TIMEOUT_SECONDS" "${HDMI_USB_RECORD_BIN}" -t 0 >/dev/null 2>>"$LOG_FILE"
+  local zero_rc=$?
+  set -e
+  if [[ "$zero_rc" == "2" ]]; then
+    mark_pass "${label}: --duration 0 is rejected"
+  else
+    mark_fail "${label}: --duration 0 is rejected (rc=$zero_rc)"
+  fi
+
+  rm -rf "$dir"
+}
+
 wait_for_window_state_file() {
   local expect="$1"
   local deadline=$((SECONDS + WINDOW_TIMEOUT_SECONDS))
@@ -303,9 +456,12 @@ main() {
   # Force installed mode regardless of the caller's environment.
   USE_INSTALLED=1
 
-  local HDMI_USB_BIN HDMI_USB_PY
+  local HDMI_USB_BIN HDMI_USB_PY HDMI_USB_RECORD_BIN
   HDMI_USB_BIN="$(resolve_bin hdmi-usb "${ROOT_DIR}/hdmi-usb")"
   HDMI_USB_PY="$(resolve_bin hdmi-usb.py "${ROOT_DIR}/hdmi-usb.py")"
+  # Resolved from PATH (USE_INSTALLED=1), so this also proves install.sh
+  # copied the recorder into ~/.local/bin.
+  HDMI_USB_RECORD_BIN="$(resolve_bin hdmi-usb-record "${ROOT_DIR}/hdmi-usb-record")"
 
   # Ensure GStreamer GI is importable early so failures are clear.
   if python3 - <<'PY' >/dev/null
@@ -423,6 +579,18 @@ PY
     mark_skip "MCP: test_hdmi_usb_screenshot_mcp.py (server not ready)"
   fi
 
+  # --- Recorder (hdmi-usb-record) ---
+  if [[ "$goto_summary" != "true" ]]; then
+    if command -v gst-discoverer-1.0 >/dev/null 2>&1; then
+      info "Running hdmi-usb-record tests against RTSP server"
+      run_record_test "Record" full
+    else
+      mark_skip "Record: hdmi-usb-record (gst-discoverer-1.0 not available)"
+    fi
+  else
+    mark_skip "Record: hdmi-usb-record (server not ready)"
+  fi
+
   # --- Restart server and verify restore (optional) ---
   if [[ -n "$saved_geometry" ]] && have_window_tools && [[ "$goto_summary" != "true" ]]; then
     info "Restarting server to validate window restore"
@@ -480,6 +648,12 @@ PY
       mark_fail "Headless: test_hdmi_usb_screenshot_mcp.py"
     else
       mark_pass "Headless: test_hdmi_usb_screenshot_mcp.py"
+    fi
+
+    if command -v gst-discoverer-1.0 >/dev/null 2>&1; then
+      run_record_test "Headless record"
+    else
+      mark_skip "Headless record: hdmi-usb-record (gst-discoverer-1.0 not available)"
     fi
   else
     mark_skip "Headless: start server + MCP test (skipped)"

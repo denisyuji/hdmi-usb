@@ -123,8 +123,12 @@ RTSP recorder (default URL `rtsp://127.0.0.1:1234/hdmi`, overridable via `RTSP_U
 - install + PATH usage (`~/.local/bin`)
 - RTSP server starts/listens
 - local preview window save/restore (when X11 tooling exists)
-- `test_hdmi_usb_screenshot_mcp.py` (MCP stdio against running RTSP)
-- headless RTSP + same MCP test
+- `test_hdmi_usb_screenshot_mcp.py` (MCP stdio against running RTSP): handshake,
+  `ping`, `tools/list`, an **unknown tool** call (must return an MCP `isError`
+  payload rather than a JSON-RPC error or a dead session), and `get_last_frame`
+  decoded and checked to be a **640×360** PNG (dimensions read from the IHDR chunk)
+- `hdmi-usb-record` against the same server (see `run_record_test` below)
+- headless RTSP + same MCP and recorder tests
 - software fallback: server started against a plugin directory that symlinks
   every system plugin except `libgstva.so`/`libgstvaapi.so`/`libgstnvcodec.so`
   (path from `pkg-config --variable=pluginsdir gstreamer-1.0`), asserting it
@@ -136,6 +140,18 @@ Beyond hiding the hardware plugins, it does not force/fake hardware failure
 states, so it does not exercise the runtime hardware-decode downgrade, wrapper
 recovery paths, audio card matching, or instance-kill behavior.
 
-`hdmi-usb-record` has no automated coverage; it was verified manually against a
-running server (repeated short recordings, checked with `ffprobe` for both
-tracks and the expected duration). Recorded `*.mp4` files are gitignored.
+`hdmi-usb-record` is covered by `run_record_test` in `integration-test.sh`, run
+against both the normal and the headless server. It records a short clip
+(`RECORD_DURATION_SECONDS`, default 3) and asserts:
+- exit 0 and the **last stdout line** is an existing file (the agent contract)
+- the default filename matches `hdmi-usb-<YYYYmmdd>-<HHMMSS>.mp4`
+- `gst-discoverer-1.0` finds a video stream and a duration within 1.5 s of the request
+- `--json` carries `path`, `duration_seconds`, `size_bytes`, `has_audio`, `url`,
+  with `size_bytes` matching the file on disk
+- `has_audio` agrees with whether the container really has an audio track (in
+  both directions, so a video-only capture is valid)
+- an unreachable RTSP URL exits non-zero with **empty stdout**, and `--duration 0` exits 2
+
+The last two run only in the `full` invocation, since they do not depend on the
+server mode. The whole block is skipped when `gst-discoverer-1.0` is missing.
+Recorded `*.mp4` files are written under `test-logs/` and removed afterwards.

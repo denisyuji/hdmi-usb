@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Spawn hdmi-usb-screenshot-mcp and verify the stdio MCP protocol: initialize,
-ping, tools/list, tools/call get_last_frame (PNG base64).
+ping, tools/list, an unknown tools/call, and tools/call get_last_frame
+(640x360 PNG, base64).
 
 Requires a reachable RTSP_URL. The child exits during RTSP preflight if the
 stream is unavailable.
@@ -206,6 +207,13 @@ def main() -> int:
         if "get_last_frame" not in names:
             return fail(f"get_last_frame not in tools/list: {names!r}")
 
+        # An unknown tool must come back as an MCP error payload, not as a
+        # JSON-RPC error and not as a crash that kills the stdio session.
+        rid = req("tools/call", {"name": "no_such_tool", "arguments": {}})
+        unknown = expect_result(rid, "tools/call unknown")
+        if not unknown.get("isError"):
+            return fail(f"unknown tool did not report isError: {unknown!r}")
+
         deadline = time.monotonic() + args.frame_wait
         png_b64 = None
         while time.monotonic() < deadline:
@@ -247,8 +255,15 @@ def main() -> int:
         if not raw.startswith(b"\x89PNG\r\n\x1a\n"):
             return fail("decoded image is not a PNG (bad signature)")
 
-        print("ok: MCP handshake, tools/list, get_last_frame -> valid PNG")
-        print(f"    PNG size: {len(raw)} bytes (640x360 expected from server)")
+        # Dimensions come from the IHDR chunk, which always follows the
+        # 8-byte signature: length(4) + "IHDR"(4) + width(4) + height(4).
+        width = int.from_bytes(raw[16:20], "big")
+        height = int.from_bytes(raw[20:24], "big")
+        if (width, height) != (640, 360):
+            return fail(f"unexpected PNG dimensions: {width}x{height} (expected 640x360)")
+
+        print("ok: MCP handshake, tools/list, unknown tool, get_last_frame -> valid PNG")
+        print(f"    PNG: {width}x{height}, {len(raw)} bytes")
         return 0
 
     except RuntimeError as e:

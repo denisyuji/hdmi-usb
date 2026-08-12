@@ -180,14 +180,14 @@ sudo apt install ffmpeg
 
 ## Testing
 
-`test_hdmi_usb_screenshot_mcp.py` spawns **`hdmi-usb-screenshot-mcp`**, runs `initialize` / `ping` / `tools/list` / `tools/call` for `get_last_frame`, and checks that the returned base64 decodes to a valid PNG. Requires an **already running** RTSP server (default URL `rtsp://127.0.0.1:1234/hdmi`).
+`test_hdmi_usb_screenshot_mcp.py` spawns **`hdmi-usb-screenshot-mcp`**, runs `initialize` / `ping` / `tools/list`, checks that an **unknown tool** comes back as an MCP error payload, and calls `get_last_frame`, verifying that the returned base64 decodes to a valid **640×360** PNG. Requires an **already running** RTSP server (default URL `rtsp://127.0.0.1:1234/hdmi`).
 
 ```bash
 python3 test_hdmi_usb_screenshot_mcp.py
 python3 test_hdmi_usb_screenshot_mcp.py --frame-wait 60 --debug-child
 ```
 
-`integration-test.sh` is a best-effort integration test that installs the scripts into `~/.local/bin`, then exercises the most important user-facing flows.
+`integration-test.sh` is a best-effort integration test that installs the scripts into `~/.local/bin`, then exercises the most important user-facing flows. Alongside the RTSP server, window geometry and MCP checks, it runs **`hdmi-usb-record`** against both the normal and the headless server, verifying the printed path, the timestamped default filename, the recorded duration and streams (via `gst-discoverer-1.0`), the `--json` fields, and the failure paths. Set `RECORD_DURATION_SECONDS` to change the clip length used by those checks.
 
 **Covered:**
 - Installation via `install.sh`

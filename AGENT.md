@@ -37,6 +37,7 @@ Unified HDMI USB RTSP server (and local preview).
 - `--width <px>`: force local viewer window width (16:9)
 - `--debug`: enable app logs (`[INFO]`, `[LOCAL]`, etc.)
 - `--gst-debug`: enable GStreamer logs (very verbose)
+- `--gst-debug-audio`: trace the clock-slaving/resync path (alsasrc, pulsesink, audiobasesink, interaudio bridge) into `~/.cache/hdmi-usb/gst-audio-debug.log` (override with `GST_DEBUG_FILE`)
 - `--reset-window`: clear saved window geometry (XDG: `~/.config/hdmi-usb/window-state`)
 
 ### hdmi-usb (wrapper)

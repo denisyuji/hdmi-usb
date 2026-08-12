@@ -64,6 +64,9 @@ AUDIO_FORCE_CARD=1 python3 hdmi-usb.py
 python3 hdmi-usb.py --debug
 python3 hdmi-usb.py --gst-debug
 
+# Diagnose audio cuts: audio-sync trace to ~/.cache/hdmi-usb/gst-audio-debug.log
+python3 hdmi-usb.py --gst-debug-audio
+
 # Trim lip-sync in the preview window (milliseconds)
 python3 hdmi-usb.py --av-offset -60
 ```

@@ -94,12 +94,36 @@ def setup_gstreamer_debug():
     This project distinguishes between:
     - App debug logs (our `[INFO]`, `[LOCAL]`, etc.) via `--debug`
     - GStreamer debug logs via `--gst-debug`
+    - Targeted audio-sync debug logs via `--gst-debug-audio`
 
     By default, we keep GStreamer logs quiet to avoid drowning out app logs.
     """
     import sys
 
     argv = set(sys.argv)
+
+    # Narrow, high-verbosity trace for the clock-slaving/discontinuity path
+    # implicated in local-preview audio cuts: the two clock-slaving elements
+    # (alsasrc, pulsesink), the audiobasesink discontinuity/resync logic that
+    # sits downstream of slaving, the shared GstSystemClock, and the
+    # interaudio bridge between the capture and local-display pipelines.
+    # Routed to a file instead of stderr since at this verbosity it would
+    # otherwise drown out the app's own `[LOCAL]`/`[INFO]` logs.
+    if '--gst-debug-audio' in argv:
+        os.environ['GST_DEBUG'] = os.environ.get(
+            'GST_DEBUG',
+            'default:1,GST_CLOCK:5,audiobasesrc:7,audiobasesink:7,'
+            'alsasrc:5,pulsesink:5,pulseaudiosink:5,interaudio*:5'
+        )
+        os.environ['GST_DEBUG_NO_COLOR'] = '1'
+        log_path = os.environ.get(
+            'GST_DEBUG_FILE',
+            str(Path.home() / '.cache' / 'hdmi-usb' / 'gst-audio-debug.log'),
+        )
+        Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+        os.environ['GST_DEBUG_FILE'] = log_path
+        print(f"GStreamer audio-sync debug log: {log_path}", file=sys.stderr)
+        return
 
     # If the user explicitly requests GStreamer logs, enable them.
     if '--gst-debug' in argv:
@@ -108,7 +132,7 @@ def setup_gstreamer_debug():
         # expected on this capture stack and drown out actionable issues.
         os.environ['GST_DEBUG'] = os.environ.get(
             'GST_DEBUG',
-            '3,default:2,videodecoder:1,rtspstream:1,rtpsession:1,'
+            '4,default:2,videodecoder:1,rtspstream:1,rtpsession:1,'
             'rtspmedia:1,udpsrc:1,rtpjitterbuffer:1,GST_PADS:1,alsa:1,'
             'v4l2:1,v4l2bufferpool:1'
         )
@@ -116,7 +140,7 @@ def setup_gstreamer_debug():
         return
 
     # If app debug is enabled (or even in normal mode), keep GStreamer quiet unless
-    # the user explicitly opted in via --gst-debug.
+    # the user explicitly opted in via --gst-debug/--gst-debug-audio.
     #
     # This also prevents an externally-set GST_DEBUG from spamming output when the
     # user just wants `[LOCAL]` debug messages.
@@ -1542,8 +1566,10 @@ class LocalDisplayPipeline:
 
         The buffer size sets the preview latency for video too: both local
         sinks sync to the clock, so the pipeline runs at the largest sink
-        latency, which is this one.  60 ms is the smallest buffer that stayed
-        underrun-free here; raise it toward 200 ms if audio crackles.
+        latency, which is this one. 60 ms was the smallest buffer that stayed
+        underrun-free before clock slaving (see below) was added; 150 ms is
+        the current value. Raise it further, toward 200-300 ms, if
+        underflows still show up in the pulsesink debug log.
 
         provide-clock=false keeps pulsesink from becoming this pipeline's
         clock. Left at its default it would, so this pipeline's time base
@@ -1555,10 +1581,31 @@ class LocalDisplayPipeline:
         clock (see the capture pipeline's alsasrc), gives both pipelines the
         literal same clock object, since GstSystemClock is a process-wide
         singleton.
+
+        Once pulsesink no longer owns the clock it must slave its playback
+        device to the borrowed one, but NOT via slave-method=resample: that
+        was tried here first and produced audible noise. Removing it alone
+        did not fix the noise, though (see the capture pipeline's alsasrc)
+        — the actual corrupting resampler was there, not here. Left at the
+        default "skew" method, which only re-timestamps.
+
+        The cuts confirmed on this machine (GST_DEBUG=pulsesink:5) were real
+        ring-buffer underflows: "Got underflow" from
+        gst_pulsering_stream_underflow_cb, about once a second. Audio reaches
+        this sink through alsasrc's queue -> interaudiosink -> interaudiosrc
+        -> queue, a path scheduled on the GLib main loop rather than a
+        dedicated streaming thread; whatever else that loop is doing (window
+        geometry polling, RTSP client I/O) can delay a push long enough to
+        drain a 60 ms ring buffer. 150 ms gives that jitter more room to
+        absorb before the buffer runs dry; raise further if underflows
+        persist, per the note above.
         """
         if Gst.ElementFactory.find("pulsesink"):
             self.log("Using pulsesink for local audio output")
-            return "pulsesink buffer-time=60000 latency-time=20000 provide-clock=false"
+            return (
+                "pulsesink buffer-time=150000 latency-time=30000 "
+                "provide-clock=false"
+            )
         self.log("pulsesink not found, falling back to autoaudiosink")
         return "autoaudiosink"
 
@@ -1852,14 +1899,34 @@ class RTSPServer(GstRtspServer.RTSPServer):
             # frames from the pipeline clock at arrival), so falling back to
             # GstSystemClock puts video, audio, and the local-display
             # pipeline (see pulsesink) all on the same accurate time base.
-            # slave-method=resample then corrects the real ADC drift by
-            # gently resampling the audio to that clock, instead of the
-            # default "skew" method, which just re-timestamps and produces
-            # periodic jumps.
+            # slave-method=resample was tried here to correct the real ADC
+            # drift smoothly instead of via the default "skew" method's
+            # periodic jumps, but it produced audible corruption (verified:
+            # removing it, with skew as the only slaving in the whole
+            # capture+local-display chain, was the difference between noise
+            # and clean audio). This alsasrc feeds both the RTSP stream and
+            # the local preview, so a bad resampler here corrupts both, not
+            # just one. Left on the default "skew" method: it only
+            # re-timestamps, so the 44 ppm drift this was meant to fix goes
+            # back to producing an occasional jump instead of continuous
+            # noise, which is the better trade until the resample corruption
+            # is understood.
+            # buffer-time sizes the ALSA capture ring; latency-time sizes one
+            # period, and only the latter costs latency, so the ring can be
+            # generous for free. At the original 50 ms the ring was smaller
+            # than the stalls this reader actually sees: pushes were measured
+            # pausing for 85-128 ms at a time, the card wrapped, and the
+            # samples were gone. The loss was 1.7% of all audio (alsasrc
+            # delivered 47184 Hz while arecord on the same device measured
+            # 47983 Hz), which drained the interaudio surface every ~2.5 s and
+            # made interaudiosrc fabricate 25 ms of silence to fill it — the
+            # audible cuts in the local preview. 400 ms of ring absorbs the
+            # worst observed stall three times over: loss drops to 0.004% and
+            # the silence insertions disappear entirely.
             audio = (
                 f' alsasrc device="{device_q}" '
-                f'buffer-time=50000 latency-time=10000 '
-                f'provide-clock=false slave-method=resample ! '
+                f'buffer-time=400000 latency-time=10000 '
+                f'provide-clock=false ! '
                 f'queue max-size-time=1000000000 ! audioconvert ! audioresample ! tee name=atee '
                 f'atee. ! queue ! interaudiosink channel=hdmi-rtsp-a '
                 f'atee. ! queue ! interaudiosink channel=hdmi-local-a'
@@ -2314,6 +2381,14 @@ COMPATIBILITY:
         '--gst-debug',
         action='store_true',
         help='Enable GStreamer debug output (very verbose)'
+    )
+    parser.add_argument(
+        '--gst-debug-audio',
+        action='store_true',
+        help='Trace clock-slaving/resync activity (alsasrc, pulsesink, '
+             'audiobasesink, interaudio bridge) for diagnosing audio cuts; '
+             'written to ~/.cache/hdmi-usb/gst-audio-debug.log (override '
+             'with GST_DEBUG_FILE)'
     )
     args = parser.parse_args()
     

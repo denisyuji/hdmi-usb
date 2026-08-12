@@ -4,3 +4,4 @@ __pycache__/
 test-logs/
 screenshot_*.png
 screenshot_*.base64
+*.mp4

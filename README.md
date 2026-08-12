@@ -20,6 +20,7 @@ Scripts to detect and preview using cheap USB HDMI capture devices using GStream
 - **Audio support** - automatically detects and uses audio from capture device
 - **Local display window** - live preview
 - **RTSP streaming** - scripts to show live video capture on the screen of the local machine and/or to stream live video/audio over network
+- **Recording** - `hdmi-usb-record` saves a timed audio+video clip from the RTSP stream to MP4
 - **MCP frame grabber** - `hdmi-usb-screenshot-mcp` exposes the live RTSP frame over MCP stdio
 - **Window state** - automatically saves and restores window position
 
@@ -101,6 +102,29 @@ gst-launch-1.0 rtspsrc location=rtsp://127.0.0.1:1234/hdmi ! decodebin ! autovid
 
 Use `--help` for more options.
 
+### Recording (`hdmi-usb-record`)
+
+Record a fixed amount of audio and video from the running RTSP stream into an MP4 file. Start the RTSP server first (for example, `./hdmi-usb --debug` or `python3 hdmi-usb.py`), then run:
+
+```bash
+# 10 seconds (default), auto-named ./hdmi-usb-<timestamp>.mp4
+./hdmi-usb-record
+
+# 30 seconds
+./hdmi-usb-record -t 30
+
+# Explicit output path
+./hdmi-usb-record -o /tmp/clip.mp4
+```
+
+Recording uses **GStreamer** (`rtspsrc ! rtph264depay ! h264parse` and `rtpmp4gdepay ! aacparse` into `mp4mux`), like the rest of this project — no extra tools are needed beyond the dependencies already listed below. The stream is **copied**, not re-encoded: the server already sends **H.264** video and **AAC** audio, both of which mux directly into MP4, so recording costs almost no CPU. Audio is picked up automatically when the server is streaming it, and a **video-only** stream records fine too.
+
+The script is meant to be easy to drive from an agent. On success the **last line of stdout** is the **absolute path** of the recording and the exit status is `0`; progress and errors go to **stderr** only, so a caller can do `FILE=$(./hdmi-usb-record)`. With **`--json`**, stdout is a single object with `path`, `duration_seconds`, `size_bytes`, `has_audio` and `url`. On failure stdout stays empty and the exit status is non-zero.
+
+The duration is counted from the **first frame received**, not from process start, so a slow RTSP handshake does not eat into the requested length.
+
+CLI flags: `--duration` / `-t`, `--output` / `-o`, `--url` / `-u`, `--json`, `--debug` / `-d` (see `--help`). Environment: `RTSP_URL`.
+
 ### MCP frame server (`hdmi-usb-screenshot-mcp`)
 
 **Python 3** + GStreamer command-line tools (no PyPI packages). Start the RTSP server first (for example, `./hdmi-usb --debug` or `python3 hdmi-usb.py`), then run:
@@ -134,7 +158,7 @@ Example Cursor `mcpServers` entry (include `PYTHONUNBUFFERED` so stdio stays res
 
 ## Installation
 
-`./install.sh` copies **`hdmi-usb.py`**, **`hdmi-usb`**, and **`hdmi-usb-screenshot-mcp`** into **`~/.local/bin`**, ensures **`~/.local/bin`** is on **`PATH`**, and **merges** a **`hdmi-screenshot`** entry into **`~/.cursor/mcp.json`** (command `~/.local/bin/hdmi-usb-screenshot-mcp`, env **`RTSP_URL`** and **`PYTHONUNBUFFERED=1`**). Re-run it after pulling changes; then **reload MCP** in Cursor.
+`./install.sh` copies **`hdmi-usb.py`**, **`hdmi-usb`**, **`hdmi-usb-screenshot-mcp`**, and **`hdmi-usb-record`** into **`~/.local/bin`**, ensures **`~/.local/bin`** is on **`PATH`**, and **merges** a **`hdmi-screenshot`** entry into **`~/.cursor/mcp.json`** (command `~/.local/bin/hdmi-usb-screenshot-mcp`, env **`RTSP_URL`** and **`PYTHONUNBUFFERED=1`**). Re-run it after pulling changes; then **reload MCP** in Cursor.
 
 ### Dependencies
 

@@ -20,9 +20,10 @@ mkdir -p ~/.local/bin
 cp ./hdmi-usb.py ~/.local/bin/hdmi-usb.py
 cp ./hdmi-usb ~/.local/bin/hdmi-usb
 cp ./hdmi-usb-screenshot-mcp ~/.local/bin/hdmi-usb-screenshot-mcp
+cp ./hdmi-usb-record ~/.local/bin/hdmi-usb-record
 
 # Ensure scripts are executable
-chmod +x ~/.local/bin/hdmi-usb ~/.local/bin/hdmi-usb.py ~/.local/bin/hdmi-usb-screenshot-mcp
+chmod +x ~/.local/bin/hdmi-usb ~/.local/bin/hdmi-usb.py ~/.local/bin/hdmi-usb-screenshot-mcp ~/.local/bin/hdmi-usb-record
 
 # === Ensure ~/.local/bin is in PATH ===
 if ! echo ":$PATH:" | grep -q ":$HOME/.local/bin:"; then
@@ -106,3 +107,4 @@ PY
 echo "[INFO] hdmi-usb installed successfully!"
 echo "[INFO] You can now use hdmi-usb by running 'hdmi-usb' in your terminal."
 echo "[INFO] MCP screenshot server: 'hdmi-usb-screenshot-mcp'"
+echo "[INFO] Stream recorder: 'hdmi-usb-record' (see --help)"

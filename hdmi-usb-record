@@ -1,0 +1,370 @@
+#!/usr/bin/env python3
+"""Record audio+video from the hdmi-usb.py RTSP stream to a file.
+
+Uses GStreamer (the same stack as the rest of this project): the RTSP payloads
+are depayloaded, parsed and remuxed into MP4 without re-encoding, so recording
+costs almost no CPU and the picture is bit-identical to what the server sends.
+
+Designed to be easy to drive from an LLM/agent: the last line of stdout is
+always the absolute path of the finished recording (or, with --json, the whole
+stdout is a single JSON object).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime
+
+# Keep GStreamer quiet unless the caller asks for logs, so stderr stays useful.
+if "--debug" not in sys.argv and "-d" not in sys.argv:
+    os.environ.setdefault("GST_DEBUG", "0")
+
+import gi
+
+gi.require_version("Gst", "1.0")
+from gi.repository import GLib, Gst  # noqa: E402
+
+DEFAULT_RTSP_URL = os.environ.get("RTSP_URL", "rtsp://127.0.0.1:1234/hdmi")
+DEFAULT_DURATION_SECONDS = 10.0
+# RTSP jitter-buffer size; matches the other clients in this project.
+RTSP_LATENCY_MS = 200
+# How long to wait for the first frame before giving up on the connection.
+CONNECT_TIMEOUT_SECONDS = 15.0
+# Fallback for sources that never emit no-more-pads (see Recorder._block_probes).
+BRANCH_UNBLOCK_TIMEOUT_SECONDS = 5.0
+# How long to wait for the muxer to finish writing the MP4 index after EOS.
+FINALIZE_TIMEOUT_SECONDS = 10.0
+
+EPILOG = f"""\
+output:
+  On success the last line of stdout is the absolute path of the recording,
+  and the exit status is 0. Everything else goes to stderr, so a caller can
+  simply take the last stdout line as the filename:
+
+    FILE=$(./hdmi-usb-record)
+
+  With --json, stdout is instead a single JSON object:
+
+    {{"path": "...", "duration_seconds": 10.0, "size_bytes": 12345,
+     "has_audio": true, "url": "{DEFAULT_RTSP_URL}"}}
+
+  On failure nothing is written to stdout and the exit status is non-zero;
+  the reason is printed to stderr.
+
+examples:
+  ./hdmi-usb-record                        # 10 s, auto-named file in cwd
+  ./hdmi-usb-record -t 30                  # 30 s
+  ./hdmi-usb-record -o /tmp/clip.mp4       # explicit output path
+  ./hdmi-usb-record -t 5 --json            # machine-readable result
+
+requirements:
+  The RTSP server must already be running (./hdmi-usb.py). Recording is a
+  stream copy (depay/parse/remux only), so no encoder is involved.
+"""
+
+
+def default_output_path() -> str:
+    """Timestamped file in the current directory, e.g. hdmi-usb-20260811-213500.mp4."""
+    return os.path.abspath(
+        datetime.now().strftime("hdmi-usb-%Y%m%d-%H%M%S.mp4")
+    )
+
+
+class Recorder:
+    """Records `duration` seconds of `url` into `output` via an MP4 remux."""
+
+    def __init__(self, url: str, duration: float, output: str, debug: bool):
+        self.url = url
+        self.duration = duration
+        self.output = output
+        self.debug = debug
+
+        self.error: str | None = None
+        self.has_audio = False
+        self._recording_started = False
+        self._eos_sent = False
+        self._connect_timeout_id: int | None = None
+        # mp4mux refuses new request pads once it has started writing, so every
+        # branch is held blocked until rtspsrc has announced all of its pads.
+        self._block_probes: list[tuple[Gst.Pad, int]] = []
+
+        self.loop = GLib.MainLoop()
+        self.pipeline = Gst.Pipeline.new("hdmi-usb-record")
+
+        self.src = self._make("rtspsrc")
+        self.src.set_property("location", url)
+        self.src.set_property("latency", RTSP_LATENCY_MS)
+        # TCP avoids UDP packet loss and matches how the other clients connect.
+        Gst.util_set_object_arg(self.src, "protocols", "tcp")
+
+        self.mux = self._make("mp4mux")
+        self.sink = self._make("filesink")
+        self.sink.set_property("location", output)
+
+        for element in (self.src, self.mux, self.sink):
+            self.pipeline.add(element)
+
+        if not self.mux.link(self.sink):
+            raise RuntimeError("Could not link mp4mux to filesink")
+
+        self.src.connect("pad-added", self._on_pad_added)
+        self.src.connect("no-more-pads", self._on_no_more_pads)
+
+    def log(self, message: str) -> None:
+        if self.debug:
+            print(f"[DEBUG] {message}", file=sys.stderr)
+
+    @staticmethod
+    def _make(factory: str) -> Gst.Element:
+        element = Gst.ElementFactory.make(factory)
+        if element is None:
+            raise RuntimeError(
+                f"GStreamer element '{factory}' is missing. Install the "
+                f"GStreamer plugin packages listed in README.md."
+            )
+        return element
+
+    def _on_pad_added(self, _src: Gst.Element, pad: Gst.Pad) -> None:
+        """Build a depay/parse branch for each RTSP stream as it appears."""
+        caps = pad.get_current_caps() or pad.query_caps(None)
+        if not caps or caps.get_size() == 0:
+            return
+        structure = caps.get_structure(0)
+        encoding = (structure.get_string("encoding-name") or "").upper()
+
+        if encoding == "H264":
+            chain, mux_template = ["rtph264depay", "h264parse"], "video_%u"
+        elif encoding == "MPEG4-GENERIC":
+            # AAC, as sent by the server's rtpmp4gpay.
+            chain, mux_template = ["rtpmp4gdepay", "aacparse"], "audio_%u"
+            self.has_audio = True
+        else:
+            self.log(f"Ignoring unsupported RTSP stream: {encoding}")
+            return
+
+        self.log(f"Linking {encoding} stream via {' ! '.join(chain)}")
+
+        elements = [self._make(name) for name in chain]
+        for element in elements:
+            self.pipeline.add(element)
+        for upstream, downstream in zip(elements, elements[1:]):
+            if not upstream.link(downstream):
+                self.error = f"Could not link {upstream.name} to {downstream.name}"
+                self.loop.quit()
+                return
+
+        if pad.link(elements[0].get_static_pad("sink")) != Gst.PadLinkReturn.OK:
+            self.error = f"Could not link the {encoding} RTSP pad into the pipeline"
+            self.loop.quit()
+            return
+
+        mux_pad = self.mux.request_pad_simple(mux_template)
+        if mux_pad is None:
+            self.error = f"mp4mux refused a '{mux_template}' pad"
+            self.loop.quit()
+            return
+
+        # Block the branch before it can feed mp4mux: the muxer must not start
+        # writing until every stream of this RTSP session has its pad.
+        branch_src = elements[-1].get_static_pad("src")
+        probe_id = branch_src.add_probe(
+            Gst.PadProbeType.BLOCK_DOWNSTREAM, lambda _pad, _info: Gst.PadProbeReturn.OK
+        )
+        self._block_probes.append((branch_src, probe_id))
+
+        if branch_src.link(mux_pad) != Gst.PadLinkReturn.OK:
+            self.error = f"Could not link the {encoding} branch into mp4mux"
+            self.loop.quit()
+            return
+
+        for element in elements:
+            element.sync_state_with_parent()
+
+        # Start counting the recording only once media actually flows, so a slow
+        # RTSP handshake does not eat into the requested duration.
+        pad.add_probe(Gst.PadProbeType.BUFFER, self._on_first_buffer)
+
+    def _on_no_more_pads(self, _src: Gst.Element) -> None:
+        """All RTSP streams are known: let the branches feed the muxer."""
+        self._unblock_branches()
+
+    def _unblock_branches(self) -> bool:
+        for pad, probe_id in self._block_probes:
+            pad.remove_probe(probe_id)
+        if self._block_probes:
+            self.log(f"Unblocked {len(self._block_probes)} branch(es) into mp4mux")
+        self._block_probes = []
+        return False
+
+    def _on_first_buffer(self, pad: Gst.Pad, _info: Gst.PadProbeInfo) -> Gst.PadProbeReturn:
+        if not self._recording_started:
+            self._recording_started = True
+            # Called on a streaming thread; hop to the main loop to touch timers.
+            GLib.idle_add(self._start_duration_timer)
+        return Gst.PadProbeReturn.REMOVE
+
+    def _start_duration_timer(self) -> bool:
+        if self._connect_timeout_id is not None:
+            GLib.source_remove(self._connect_timeout_id)
+            self._connect_timeout_id = None
+        self.log(f"First frame received; recording {self.duration:g}s")
+        GLib.timeout_add(int(self.duration * 1000), self._stop_recording)
+        return False
+
+    def _stop_recording(self) -> bool:
+        """Send EOS so mp4mux writes a complete, playable file."""
+        if not self._eos_sent:
+            self._eos_sent = True
+            self.log("Duration reached; sending EOS to finalize the MP4")
+            self.pipeline.send_event(Gst.Event.new_eos())
+            # If the muxer never reports EOS, don't hang forever.
+            GLib.timeout_add(int(FINALIZE_TIMEOUT_SECONDS * 1000), self._finalize_timeout)
+        return False
+
+    def _finalize_timeout(self) -> bool:
+        self.error = (
+            f"The recording did not finish writing within "
+            f"{FINALIZE_TIMEOUT_SECONDS:g}s; the file may be incomplete."
+        )
+        self.loop.quit()
+        return False
+
+    def _connect_timeout(self) -> bool:
+        self._connect_timeout_id = None
+        self.error = (
+            f"No data received from {self.url} within "
+            f"{CONNECT_TIMEOUT_SECONDS:g}s. Is the RTSP server running? "
+            f"Start it with: ./hdmi-usb.py"
+        )
+        self.loop.quit()
+        return False
+
+    def _on_bus_message(self, _bus: Gst.Bus, message: Gst.Message) -> bool:
+        if message.type == Gst.MessageType.ERROR:
+            err, debug_info = message.parse_error()
+            detail = f"\n{debug_info}" if (self.debug and debug_info) else ""
+            self.error = (
+                f"{err.message}. Is the RTSP server running at {self.url}? "
+                f"Start it with: ./hdmi-usb.py{detail}"
+            )
+            self.loop.quit()
+        elif message.type == Gst.MessageType.EOS:
+            self.log("EOS reached; recording finalized")
+            self.loop.quit()
+        elif message.type == Gst.MessageType.WARNING and self.debug:
+            warn, _ = message.parse_warning()
+            self.log(f"WARNING: {warn.message}")
+        return True
+
+    def run(self) -> str:
+        """Record and return the output path. Raises RuntimeError on failure."""
+        bus = self.pipeline.get_bus()
+        bus.add_signal_watch()
+        bus.connect("message", self._on_bus_message)
+
+        if self.pipeline.set_state(Gst.State.PLAYING) == Gst.StateChangeReturn.FAILURE:
+            self.pipeline.set_state(Gst.State.NULL)
+            raise RuntimeError(f"Could not start the pipeline for {self.url}")
+
+        self._connect_timeout_id = GLib.timeout_add(
+            int(CONNECT_TIMEOUT_SECONDS * 1000), self._connect_timeout
+        )
+        # Safety net: if a source never emits no-more-pads, don't stay blocked.
+        GLib.timeout_add(int(BRANCH_UNBLOCK_TIMEOUT_SECONDS * 1000), self._unblock_branches)
+
+        try:
+            self.loop.run()
+        except KeyboardInterrupt:
+            self.error = "Interrupted before the recording finished"
+        finally:
+            self.pipeline.set_state(Gst.State.NULL)
+            bus.remove_signal_watch()
+
+        if self.error:
+            raise RuntimeError(self.error)
+        if not os.path.exists(self.output) or os.path.getsize(self.output) == 0:
+            raise RuntimeError(f"Recording produced no data: {self.output}")
+        return self.output
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="hdmi-usb-record",
+        description=(
+            "Record audio and video from the hdmi-usb.py RTSP stream to an MP4 "
+            "file and print the resulting filename."
+        ),
+        epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "-t", "--duration",
+        type=float,
+        default=DEFAULT_DURATION_SECONDS,
+        metavar="SECONDS",
+        help=f"Recording length in seconds (default: {DEFAULT_DURATION_SECONDS:g})",
+    )
+    parser.add_argument(
+        "-o", "--output",
+        metavar="PATH",
+        help="Output file (default: ./hdmi-usb-<timestamp>.mp4)",
+    )
+    parser.add_argument(
+        "-u", "--url",
+        default=DEFAULT_RTSP_URL,
+        help=f"RTSP URL to record (default: {DEFAULT_RTSP_URL})",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a JSON object with the result instead of just the filename",
+    )
+    parser.add_argument(
+        "-d", "--debug",
+        action="store_true",
+        help="Show pipeline details and GStreamer messages on stderr",
+    )
+    args = parser.parse_args()
+
+    if args.duration <= 0:
+        print("❌ ERROR: --duration must be greater than 0", file=sys.stderr)
+        return 2
+
+    output = os.path.abspath(args.output) if args.output else default_output_path()
+    parent = os.path.dirname(output) or "."
+    if not os.path.isdir(parent):
+        print(f"❌ ERROR: Output directory does not exist: {parent}", file=sys.stderr)
+        return 2
+
+    Gst.init(None)
+
+    print(f"⏺  Recording {args.duration:g}s from {args.url} ...", file=sys.stderr)
+
+    try:
+        recorder = Recorder(args.url, args.duration, output, args.debug)
+        path = recorder.run()
+    except RuntimeError as e:
+        print(f"❌ ERROR: {e}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps({
+            "path": path,
+            "duration_seconds": args.duration,
+            "size_bytes": os.path.getsize(path),
+            "has_audio": recorder.has_audio,
+            "url": args.url,
+        }))
+    else:
+        audio_note = "video+audio" if recorder.has_audio else "video only"
+        print(f"✅ Saved {os.path.getsize(path)} bytes ({audio_note})", file=sys.stderr)
+        print(path)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

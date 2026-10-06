@@ -215,8 +215,9 @@ find_preview_window_id() {
       return 0
     fi
 
-    # Fallback: look for any GStreamer/OpenGL-ish window class.
-    win_id="$(wmctrl -lx 2>/dev/null | awk 'tolower($0) ~ /(gstreamer|glimagesink|ximagesink|opengl)/ {print $1; exit}')"
+    # Fallback: look for any GStreamer/OpenGL-ish window class, or the title
+    # hdmi-usb.py gives its window.
+    win_id="$(wmctrl -lx 2>/dev/null | awk 'tolower($0) ~ /(gstreamer|glimagesink|ximagesink|opengl)/ || (NF == 5 && $5 == "HDMI-USB") {print $1; exit}')"
     if [[ -n "$win_id" ]]; then
       echo "$win_id"
       return 0

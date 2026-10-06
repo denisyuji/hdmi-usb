@@ -23,6 +23,7 @@ Scripts to detect and preview using cheap USB HDMI capture devices using GStream
 - **Recording** - `hdmi-usb-record` saves a timed audio+video clip from the RTSP stream to MP4
 - **MCP frame grabber** - `hdmi-usb-screenshot-mcp` exposes the live RTSP frame over MCP stdio
 - **Window state** - automatically saves and restores window position
+- **Window title and icon** - the preview window is titled "HDMI-USB" and shows a monitor icon
 
 ## Usage
 

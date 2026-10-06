@@ -19,6 +19,8 @@ Key Features:
 """
 import gi
 import argparse
+import ctypes
+import ctypes.util
 import signal
 import os
 import re
@@ -66,6 +68,10 @@ AUDIO_BITRATE_BPS = 128000
 VIDEO_BITRATE_KBPS = 3000
 VIDEO_KEYFRAME_INTERVAL_FRAMES = 30
 VIDEO_CAPTURE_FPS = 60
+# Title given to the local preview window (the sink's own default is
+# "OpenGL renderer"). Also used to recognise the window, see get_window_id.
+WINDOW_TITLE = 'HDMI-USB'
+
 # Window after the hardware-decode capture pipeline reaches PLAYING during which
 # a pipeline error is treated as a hardware failure and retried in software.
 HW_DECODE_PROBATION_SECONDS = 10
@@ -871,6 +877,8 @@ class LocalDisplayPipeline:
         moving/resizing has no chrome to grab. Setting both hints once per
         window is enough to get normal borders back without touching the
         existing geometry logic below.
+
+        Also gives the window its own title and icon.
         """
         if window_id in self._decorated_window_ids:
             return
@@ -890,6 +898,77 @@ class LocalDisplayPipeline:
             )
         except Exception as e:
             self.log(f"Could not set decoration hints on {window_id}: {e}")
+
+        # The sinks also leave their own generic title ("OpenGL renderer") and
+        # no icon, so the WM shows its default X icon.
+        try:
+            subprocess.run(
+                ['xprop', '-id', window_id, '-f', '_NET_WM_NAME', '8u',
+                 '-set', '_NET_WM_NAME', WINDOW_TITLE],
+                capture_output=True, text=True, timeout=1
+            )
+            subprocess.run(
+                ['xprop', '-id', window_id, '-f', 'WM_NAME', '8s',
+                 '-set', 'WM_NAME', WINDOW_TITLE],
+                capture_output=True, text=True, timeout=1
+            )
+        except Exception as e:
+            self.log(f"Could not set title on {window_id}: {e}")
+
+        # _NET_WM_ICON: width, height, then ARGB pixels. Draw a small monitor.
+        size = 64
+        icon = [size, size] + [0] * (size * size)
+        # (x0, y0, x1, y1, corner radius, ARGB at top, ARGB at bottom)
+        for x0, y0, x1, y1, r, top, bottom in (
+            (3, 7, 61, 47, 5, 0xFF3B4252, 0xFF242933),    # bezel
+            (7, 11, 57, 43, 2, 0xFF5FC4F5, 0xFF1B6FB0),   # screen
+            (27, 47, 37, 53, 0, 0xFF4C566A, 0xFF3B4252),  # stand neck
+            (17, 53, 47, 58, 2, 0xFF4C566A, 0xFF3B4252),  # stand base
+        ):
+            for y in range(y0, y1):
+                t = (y - y0) / (y1 - y0 - 1)
+                argb = 0xFF000000
+                for shift in (16, 8, 0):
+                    a, b = (top >> shift) & 0xFF, (bottom >> shift) & 0xFF
+                    argb |= int(a + (b - a) * t) << shift
+                for x in range(x0, x1):
+                    # Leave pixels outside the rounded corners transparent.
+                    dx = max(x0 + r - x - 0.5, x + 0.5 - (x1 - r), 0)
+                    dy = max(y0 + r - y - 0.5, y + 0.5 - (y1 - r), 0)
+                    if dx * dx + dy * dy <= r * r:
+                        icon[2 + y * size + x] = argb
+
+        # xprop cannot set more than 64 elements, so talk to libX11 directly.
+        try:
+            x11 = ctypes.CDLL(ctypes.util.find_library('X11'))
+            x11.XOpenDisplay.restype = ctypes.c_void_p
+            x11.XInternAtom.restype = ctypes.c_ulong
+            x11.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+            x11.XChangeProperty.argtypes = [
+                ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong,
+                ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+            x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+            x11.XSetErrorHandler.restype = ctypes.c_void_p
+            x11.XSetErrorHandler.argtypes = [ctypes.c_void_p]
+            display = x11.XOpenDisplay(None)
+            if display:
+                # Xlib's default error handler exits the process; ignore errors
+                # (e.g. the window closing under us) while the request is sent.
+                ignore_errors = ctypes.CFUNCTYPE(
+                    ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)(lambda *_: 0)
+                previous = x11.XSetErrorHandler(ignore_errors)
+                # Format-32 properties are passed to Xlib as C longs.
+                x11.XChangeProperty(
+                    display, int(window_id, 16),
+                    x11.XInternAtom(display, b'_NET_WM_ICON', 0),
+                    6,  # XA_CARDINAL
+                    32,
+                    0,  # PropModeReplace
+                    (ctypes.c_ulong * len(icon))(*icon), len(icon))
+                x11.XCloseDisplay(display)
+                x11.XSetErrorHandler(previous)
+        except Exception as e:
+            self.log(f"Could not set icon on {window_id}: {e}")
 
     def get_window_id(self, timeout: float = 5.0) -> Optional[str]:
         """Get window ID for GStreamer window.
@@ -955,7 +1034,8 @@ class LocalDisplayPipeline:
                                 score += 2
                             if ('gstreamer' in title_l or
                                 'opengl' in title_l or
-                                'python' in title_l):
+                                'python' in title_l or
+                                title == WINDOW_TITLE):
                                 score += 1
                             if score > best_score:
                                 best_score = score

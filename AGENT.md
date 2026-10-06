@@ -87,6 +87,7 @@ RTSP recorder (default URL `rtsp://127.0.0.1:1234/hdmi`, overridable via `RTSP_U
   - 16:9 correction adjusts the side the user did not drag (compared against the last 16:9 geometry); if both sides changed, the smaller correction wins
   - Offsets are normalised on read: xwininfo reports negative positions as `+-50` / `--28`, which used to be saved unparseable and silently dropped the whole restore
 - **Window tooling**: uses `wmctrl`, `xwininfo`, and `xprop` (best-effort; missing tools shouldn’t crash the server)
+  - `wmctrl -e` positions the WM frame while `xwininfo` reports the client area inside it; positions are shifted by `_NET_FRAME_EXTENTS` (left, top) when applied, otherwise the restore never matches under KWin and the window drifts on every launch
   - The sink window is identified by scoring PID (`wmctrl -lp`), WM_CLASS (`wmctrl -lx`) and title; a window is only accepted above a confidence threshold, otherwise polling continues until timeout
 - **RTSP multi-client robustness**: static server pipeline avoids per-client capture opens
 - **Audio matching**: prefers ALSA card on same USB path as the video device

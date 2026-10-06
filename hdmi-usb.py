@@ -28,7 +28,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 # Ensure log output is line-buffered even when stdout/stderr are piped
 try:
@@ -1060,6 +1060,27 @@ class LocalDisplayPipeline:
 
         return None
     
+    def _get_frame_extents(self, window_id: str) -> Tuple[int, int]:
+        """Return the (left, top) size of the WM frame around the window.
+
+        `wmctrl -e` positions the frame, while xwininfo reports the client
+        area inside it. Under KWin the two differ by the frame size, so a
+        position read with xwininfo has to be shifted by it before being
+        handed back to `wmctrl -e`.
+        """
+        try:
+            result = subprocess.run(
+                ['xprop', '-id', window_id, '_NET_FRAME_EXTENTS'],
+                capture_output=True, text=True, timeout=1
+            )
+            # _NET_FRAME_EXTENTS(CARDINAL) = left, right, top, bottom
+            values = re.findall(r'\d+', result.stdout.partition('=')[2])
+            if len(values) == 4:
+                return int(values[0]), int(values[2])
+        except Exception:
+            pass
+        return 0, 0
+
     def _apply_window_state_to_window(self, window_id: str) -> bool:
         """Apply the saved window geometry to a specific window ID.
 
@@ -1080,10 +1101,12 @@ class LocalDisplayPipeline:
             target_y = int(self.restore_y)
             target_w = int(self.restore_width)
             target_h = int(self.restore_height)
+            # The saved position is the client area's; wmctrl places the frame.
+            frame_left, frame_top = self._get_frame_extents(window_id)
             # Some window managers behave poorly with negative positions.
             # Clamp to 0 so at least size restore is reliable.
-            apply_x = target_x if target_x >= 0 else 0
-            apply_y = target_y if target_y >= 0 else 0
+            apply_x = max(target_x - frame_left, 0)
+            apply_y = max(target_y - frame_top, 0)
 
             def _clear_wm_state() -> None:
                 # If the WM creates the window maximized/fullscreen, -e may be ignored.
@@ -1133,8 +1156,8 @@ class LocalDisplayPipeline:
                 current_x = int(match.group(3))
                 current_y = int(match.group(4))
                 return (
-                    abs(current_x - apply_x) < 10 and
-                    abs(current_y - apply_y) < 10 and
+                    abs(current_x - (apply_x + frame_left)) < 10 and
+                    abs(current_y - (apply_y + frame_top)) < 10 and
                     abs(current_w - target_w) < 10 and
                     abs(current_h - target_h) < 10
                 )
@@ -1265,7 +1288,10 @@ class LocalDisplayPipeline:
             if current_geometry:
                 match = re.match(r'^(\d+)x(\d+)([+-]\d+)([+-]\d+)$', current_geometry)
                 if match:
-                    cur_x, cur_y = int(match.group(3)), int(match.group(4))
+                    # xwininfo reports the client area; wmctrl places the frame.
+                    frame_left, frame_top = self._get_frame_extents(window_id)
+                    cur_x = int(match.group(3)) - frame_left
+                    cur_y = int(match.group(4)) - frame_top
 
             target_w = _round_even(max(int(width), 2))
             target_h = _round_even(max(int(height), 2))

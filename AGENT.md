@@ -75,6 +75,7 @@ RTSP recorder (default URL `rtsp://127.0.0.1:1234/hdmi`, overridable via `RTSP_U
 
 ### install.sh
 - **System Installation**: Copies scripts to `~/.local/bin/` (`hdmi-usb.py`, `hdmi-usb`, `hdmi-usb-screenshot-mcp`, `hdmi-usb-record`)
+- **Desktop entry**: Copies `hdmi-usb.desktop` to `~/.local/share/applications/` and `hdmi-usb.svg` to `~/.local/share/icons/hicolor/scalable/apps/`
 - **PATH Management**: Automatically adds `~/.local/bin` to shell PATH
 - **Shell Detection**: Supports bash, zsh, fish, and other shells
 - **Cursor MCP**: Merges `~/.cursor/mcp.json` entry **`hdmi-screenshot`** (`command` → `~/.local/bin/hdmi-usb-screenshot-mcp`, env `RTSP_URL`, `PYTHONUNBUFFERED=1`); skips on invalid JSON with a warning
@@ -90,6 +91,7 @@ RTSP recorder (default URL `rtsp://127.0.0.1:1234/hdmi`, overridable via `RTSP_U
   - `wmctrl -e` positions the WM frame while `xwininfo` reports the client area inside it; positions are shifted by `_NET_FRAME_EXTENTS` (left, top) when applied, otherwise the restore never matches under KWin and the window drifts on every launch
   - The sink window is identified by scoring PID (`wmctrl -lp`), WM_CLASS (`wmctrl -lx`) and title; a window is only accepted above a confidence threshold, otherwise polling continues until timeout
   - Once found, the window is retitled `HDMI-USB` (`WINDOW_TITLE`, replacing the sink's "OpenGL renderer") and given a monitor icon via `_NET_WM_ICON`. The icon is drawn in code and set through libX11 (`ctypes`) because `xprop -set` truncates at 64 elements. Under XWayland the window has no `_NET_WM_PID` or WM_CLASS, so the title is what lifts it over the detection threshold: `get_window_id` must keep matching `WINDOW_TITLE` as well as the sink's original title
+  - Task bars and docks resolve the icon from a desktop entry matched through the window class instead of `_NET_WM_ICON` (seen with the Plasma task manager), so the window also gets `WM_CLASS` `hdmi-usb` and `_KDE_NET_WM_DESKTOP_FILE` `hdmi-usb`. `install.sh` installs the matching `hdmi-usb.desktop` (`StartupWMClass=hdmi-usb`) and `hdmi-usb.svg` under `~/.local/share`; keep the SVG and the icon drawn in `_ensure_window_decorated` looking the same
 - **RTSP multi-client robustness**: static server pipeline avoids per-client capture opens
 - **Audio matching**: prefers ALSA card on same USB path as the video device
 - **Shutdown/cleanup**: robust cleanup via `atexit` registry + GLib signal integration

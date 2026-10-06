@@ -23,7 +23,7 @@ Scripts to detect and preview using cheap USB HDMI capture devices using GStream
 - **Recording** - `hdmi-usb-record` saves a timed audio+video clip from the RTSP stream to MP4
 - **MCP frame grabber** - `hdmi-usb-screenshot-mcp` exposes the live RTSP frame over MCP stdio
 - **Window state** - automatically saves and restores window position
-- **Window title and icon** - the preview window is titled "HDMI-USB" and shows a monitor icon
+- **Window title and icon** - the preview window is titled "HDMI-USB" and shows a monitor icon, also in the task bar/dock once `install.sh` has installed the desktop entry
 
 ## Usage
 
@@ -159,7 +159,7 @@ Example Cursor `mcpServers` entry (include `PYTHONUNBUFFERED` so stdio stays res
 
 ## Installation
 
-`./install.sh` copies **`hdmi-usb.py`**, **`hdmi-usb`**, **`hdmi-usb-screenshot-mcp`**, and **`hdmi-usb-record`** into **`~/.local/bin`**, ensures **`~/.local/bin`** is on **`PATH`**, and **merges** a **`hdmi-screenshot`** entry into **`~/.cursor/mcp.json`** (command `~/.local/bin/hdmi-usb-screenshot-mcp`, env **`RTSP_URL`** and **`PYTHONUNBUFFERED=1`**). Re-run it after pulling changes; then **reload MCP** in Cursor.
+`./install.sh` copies **`hdmi-usb.py`**, **`hdmi-usb`**, **`hdmi-usb-screenshot-mcp`**, and **`hdmi-usb-record`** into **`~/.local/bin`**, installs the **`hdmi-usb.desktop`** entry and **`hdmi-usb.svg`** icon under **`~/.local/share`**, ensures **`~/.local/bin`** is on **`PATH`**, and **merges** a **`hdmi-screenshot`** entry into **`~/.cursor/mcp.json`** (command `~/.local/bin/hdmi-usb-screenshot-mcp`, env **`RTSP_URL`** and **`PYTHONUNBUFFERED=1`**). Re-run it after pulling changes; then **reload MCP** in Cursor.
 
 ### Dependencies
 

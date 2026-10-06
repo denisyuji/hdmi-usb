@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=HDMI-USB
+Comment=Live preview of a USB HDMI capture device
+Exec=hdmi-usb
+Icon=hdmi-usb
+Terminal=false
+Categories=AudioVideo;Video;
+StartupWMClass=hdmi-usb

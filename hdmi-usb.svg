@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="bezel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3b4252"/>
+      <stop offset="1" stop-color="#242933"/>
+    </linearGradient>
+    <linearGradient id="screen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5fc4f5"/>
+      <stop offset="1" stop-color="#1b6fb0"/>
+    </linearGradient>
+    <linearGradient id="stand" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4c566a"/>
+      <stop offset="1" stop-color="#3b4252"/>
+    </linearGradient>
+  </defs>
+  <rect x="3" y="7" width="58" height="40" rx="5" fill="url(#bezel)"/>
+  <rect x="7" y="11" width="50" height="32" rx="2" fill="url(#screen)"/>
+  <rect x="27" y="47" width="10" height="6" fill="url(#stand)"/>
+  <rect x="17" y="53" width="30" height="5" rx="2" fill="url(#stand)"/>
+</svg>

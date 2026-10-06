@@ -25,6 +25,13 @@ cp ./hdmi-usb-record ~/.local/bin/hdmi-usb-record
 # Ensure scripts are executable
 chmod +x ~/.local/bin/hdmi-usb ~/.local/bin/hdmi-usb.py ~/.local/bin/hdmi-usb-screenshot-mcp ~/.local/bin/hdmi-usb-record
 
+# Desktop entry and icon, so task bars and docks show the monitor icon for the
+# preview window (matched through its window class) and list it as an app.
+mkdir -p ~/.local/share/applications ~/.local/share/icons/hicolor/scalable/apps
+cp ./hdmi-usb.desktop ~/.local/share/applications/hdmi-usb.desktop
+cp ./hdmi-usb.svg ~/.local/share/icons/hicolor/scalable/apps/hdmi-usb.svg
+update-desktop-database ~/.local/share/applications >/dev/null 2>&1 || true
+
 # === Ensure ~/.local/bin is in PATH ===
 if ! echo ":$PATH:" | grep -q ":$HOME/.local/bin:"; then
   SHELL_NAME="$(basename "$SHELL")"

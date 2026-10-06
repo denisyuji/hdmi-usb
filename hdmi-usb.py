@@ -878,7 +878,7 @@ class LocalDisplayPipeline:
         window is enough to get normal borders back without touching the
         existing geometry logic below.
 
-        Also gives the window its own title and icon.
+        Also gives the window its own title, icon and window class.
         """
         if window_id in self._decorated_window_ids:
             return
@@ -965,10 +965,25 @@ class LocalDisplayPipeline:
                     32,
                     0,  # PropModeReplace
                     (ctypes.c_ulong * len(icon))(*icon), len(icon))
+                # Task bars and docks take the icon from the desktop entry
+                # (hdmi-usb.desktop, see install.sh) matching the window
+                # class instead of _NET_WM_ICON, and the sinks set no class.
+                wm_class = b'hdmi-usb\0hdmi-usb\0'
+                x11.XChangeProperty(
+                    display, int(window_id, 16),
+                    x11.XInternAtom(display, b'WM_CLASS', 0),
+                    31,  # XA_STRING
+                    8, 0, wm_class, len(wm_class))
+                # KWin's own way of naming a window's desktop entry.
+                x11.XChangeProperty(
+                    display, int(window_id, 16),
+                    x11.XInternAtom(display, b'_KDE_NET_WM_DESKTOP_FILE', 0),
+                    x11.XInternAtom(display, b'UTF8_STRING', 0),
+                    8, 0, b'hdmi-usb', len(b'hdmi-usb'))
                 x11.XCloseDisplay(display)
                 x11.XSetErrorHandler(previous)
         except Exception as e:
-            self.log(f"Could not set icon on {window_id}: {e}")
+            self.log(f"Could not set icon/class on {window_id}: {e}")
 
     def get_window_id(self, timeout: float = 5.0) -> Optional[str]:
         """Get window ID for GStreamer window.
